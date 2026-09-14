@@ -13,11 +13,11 @@
 
 `VERIFY` — проверка результата. Скрипт проверяет, что карта видна системе, что вычислительные ограничения сняты через родную проверку rejoin/cmpunlocker, и что PCIe работает на Gen2.
 
-`INSTALL CUDA TOOLKIT` — установка инструментов CUDA без замены рабочего драйвера.
+`INSTALL CUDA TOOLKIT` — установка инструментов CUDA без замены рабочего драйвера. Этот пункт нужен, если в системе нужны `nvcc` и остальные инструменты CUDA.
 
 `INSTALL 4-BEEP AT START` — установка нашего скрипта, который делает четыре коротких сигнала пищалкой при старте системы.
 
-`INSTALL FAN/GPU HELPERS` — установка наших быстрых команд:
+`INSTALL FAN/GPU HELPERS` — установка быстрых команд для управления вентиляторами и режимом GPU:
 
 ```text
 fan-100
@@ -53,7 +53,7 @@ gpu-idle
 
 ## Как пользоваться `UNLOCK THIS SHIT`
 
-### 1. Подготовить чистую систему
+### 1. Подготовить систему
 
 Установите Ubuntu на стенд или сервер с CMP 90HX.
 
@@ -113,6 +113,66 @@ HA HA FULL SPEED
 Если вы не зайдёте по SSH сразу после перезагрузки, проверка всё равно пройдёт в фоне. При первом входе после этого котик всё равно покажется один раз.
 
 При следующих входах в эту же загрузку заставка уже не показывается.
+
+## Дополнительные пункты меню
+
+### VERIFY
+
+Запускает полную проверку текущего состояния:
+
+```text
+карта видна системе
+драйвер NVIDIA загружен
+compute unlock проходит родную проверку rejoin/cmpunlocker
+PCIe link работает на Gen2
+```
+
+Если проверка не прошла, программа не закрывается. Подробности остаются в правом окне с логом.
+
+### INSTALL CUDA TOOLKIT
+
+Ставит только инструменты CUDA. Рабочий драйвер не заменяется.
+
+Используйте этот пункт, если после разблокировки нужны `nvcc`, заголовки CUDA и остальные утилиты CUDA Toolkit.
+
+### INSTALL 4-BEEP AT START
+
+Ставит небольшой systemd-сервис, который при старте системы делает четыре коротких сигнала через PC speaker.
+
+Это удобно для стенда без монитора: по звуку понятно, что система дошла до старта пользовательского окружения.
+
+### INSTALL FAN/GPU HELPERS
+
+Ставит быстрые команды:
+
+`fan-100` — перевести вентиляторы NVIDIA на 100%.
+
+`fan-60` — перевести вентиляторы NVIDIA на 60%.
+
+`fan-auto` — вернуть автоматическое управление вентиляторами.
+
+`gpu-full` — включить постоянный режим, выставить максимальный power limit и снять ручную фиксацию частоты, если она была.
+
+`gpu-idle` — перевести карты в спокойный режим с ограничением мощности и частоты. Значения можно менять через переменные `GPU_IDLE_POWER_LIMIT`, `GPU_IDLE_MIN_CLOCK`, `GPU_IDLE_MAX_CLOCK`.
+
+### UNINSTALL
+
+Удаляет установленное решение и служебные файлы. После удаления нужна перезагрузка.
+
+Важно: если карта уже находится в Gen2, она может оставаться в этом состоянии до следующей перезагрузки. Поэтому возврат в исходное состояние проверяется только после reboot.
+
+## Запуск без меню
+
+Скрипт можно запускать напрямую:
+
+```bash
+sudo ./rejoin17.sh --unlock-this-shit
+sudo ./rejoin17.sh --verify
+sudo ./rejoin17.sh --install-cuda
+sudo ./rejoin17.sh --install-beep
+sudo ./rejoin17.sh --install-helpers
+sudo ./rejoin17.sh --uninstall
+```
 
 ## Что происходит после каждой перезагрузки
 
@@ -247,6 +307,66 @@ HA HA FULL SPEED
 ```
 
 If you do not log in immediately after reboot, the background check will still finish. The success message will be shown once on your first SSH login after that boot.
+
+## Additional menu items
+
+### VERIFY
+
+Runs a complete check of the current state:
+
+```text
+the card is visible to the system
+the NVIDIA driver is loaded
+compute unlock passes the native rejoin/cmpunlocker check
+the PCIe link is running at Gen2
+```
+
+If verification fails, the program does not close. Details remain in the right log pane.
+
+### INSTALL CUDA TOOLKIT
+
+Installs CUDA Toolkit only. It does not replace the working driver.
+
+Use this option if you need `nvcc`, CUDA headers, and other CUDA Toolkit utilities after unlocking the card.
+
+### INSTALL 4-BEEP AT START
+
+Installs a small systemd service that plays four short PC speaker beeps during system startup.
+
+This is useful for a headless test bench: the beeps show that the system reached user-space startup.
+
+### INSTALL FAN/GPU HELPERS
+
+Installs quick commands:
+
+`fan-100` — set NVIDIA fans to 100%.
+
+`fan-60` — set NVIDIA fans to 60%.
+
+`fan-auto` — return fans to automatic control.
+
+`gpu-full` — enable persistence mode, set maximum power limit, and reset manual graphics clock locking if it was set.
+
+`gpu-idle` — put the cards into a quiet mode with power and clock limits. Values can be changed with `GPU_IDLE_POWER_LIMIT`, `GPU_IDLE_MIN_CLOCK`, and `GPU_IDLE_MAX_CLOCK`.
+
+### UNINSTALL
+
+Removes the installed solution and service files. Reboot is required after uninstall.
+
+If the card is already running at Gen2, it may stay in that state until the next reboot. Check the original state only after reboot.
+
+## Direct launch without menu
+
+The script can be launched directly:
+
+```bash
+sudo ./rejoin17.sh --unlock-this-shit
+sudo ./rejoin17.sh --verify
+sudo ./rejoin17.sh --install-cuda
+sudo ./rejoin17.sh --install-beep
+sudo ./rejoin17.sh --install-helpers
+sudo ./rejoin17.sh --uninstall
+```
 
 ## After every reboot
 
