@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CMP90HX Pwner lab runner: staged aggressive mask open, then final soft convergence.
-# This bypasses the installed cmp90hx-gen2-minimal.sh retry policy and drives
-# rejoin16-cycle.sh / maskread.py directly.
+# This script is self-contained for BAR0 mask reads: if /opt/cmp90hx-gen2/maskread.py
+# is missing, it writes its own temporary reader and uses that.
 
 set -Eeuo pipefail
 
@@ -19,6 +19,48 @@ log() { printf '[cmp90hx-staged] %s\n' "$*"; }
 
 need_exec() {
     [[ -x "$1" ]] || { log "missing executable: $1"; exit 10; }
+}
+
+ensure_reader() {
+    if [[ -x "$READER" ]]; then
+        log "mask reader: $READER"
+        return 0
+    fi
+
+    log "mask reader missing: $READER; writing temporary BAR0 reader"
+    READER="/tmp/cmp90hx-maskread.py"
+    cat > "$READER" <<'PY_MASKREAD'
+#!/usr/bin/env python3
+import mmap
+import os
+import struct
+import sys
+
+if len(sys.argv) != 3:
+    print("usage: maskread.py <pci-bdf> <bar0-offset>", file=sys.stderr)
+    sys.exit(2)
+
+bdf = sys.argv[1]
+off = int(sys.argv[2], 0)
+path = f"/sys/bus/pci/devices/{bdf}/resource0"
+page = mmap.PAGESIZE
+base = off & ~(page - 1)
+inner = off - base
+length = inner + 4
+
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_SYNC", 0))
+try:
+    mm = mmap.mmap(fd, length, mmap.MAP_SHARED, mmap.PROT_READ, offset=base)
+    try:
+        val = struct.unpack_from("<I", mm, inner)[0]
+        print(f"0x{val:08x}")
+    finally:
+        mm.close()
+finally:
+    os.close(fd)
+PY_MASKREAD
+    chmod +x "$READER"
+    log "mask reader: $READER"
 }
 
 find_cmps() {
@@ -179,7 +221,6 @@ aggressive_open_mask() { # <bdf> <addr>
     log "$bdf $addr aggressive start readback=${cur:-none}"
     [[ "$cur" == "0xffffffff" ]] && { log "$bdf $addr already open"; return 0; }
 
-    # Deliberately short escalation ladder. No long 60-try loop here.
     check_timeout
     check_mask_after_write "$bdf" "$addr" "stage1-direct-write" && return 0
 
@@ -285,8 +326,9 @@ stop_old_temp_units() {
 }
 
 need_exec "$CYCLE"
-need_exec "$READER"
 need_exec "$HANDOFF"
+ensure_reader
+need_exec "$READER"
 
 START="$(date +%s)"
 log "start; timeout=${MAX_WAIT}s"
