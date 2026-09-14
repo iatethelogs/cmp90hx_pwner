@@ -404,10 +404,7 @@ purge_old_pwner() {
     rm -f "$SSH_PROFILE" \
           /etc/profile.d/cmp90hx-pwner-firstboot.sh \
           /etc/profile.d/cmp90hx-pwner-login.sh 2>/dev/null || true
-    systemctl disable --now "$BOOT_BEEP_SERVICE" 2>/dev/null || true
     rm -f /etc/update-motd.d/99-cmp90hx-pwner 2>/dev/null || true
-    rm -f "/etc/systemd/system/$BOOT_BEEP_SERVICE" /usr/local/sbin/boot-beep4.py 2>/dev/null || true
-    rm -f "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle" 2>/dev/null || true
     rm -rf "$PREFIX" "$RUNTIME_STATE_DIR" "$STATE_DIR" "$PROJECT_DIR" /usr/local/src/cmp90hx-rejoin17 2>/dev/null || true
     rm -f /etc/depmod.d/cmp90hx-gen2.conf /etc/depmod.d/*cmp90hx* /etc/depmod.d/*rejoin* /etc/depmod.d/*pwner* 2>/dev/null || true
     rm -f /etc/modprobe.d/cmp90hx-gen2-noauto.conf /etc/modprobe.d/*cmp90hx* /etc/modprobe.d/*rejoin* /etc/modprobe.d/*pwner* 2>/dev/null || true
@@ -415,6 +412,17 @@ purge_old_pwner() {
     systemctl daemon-reload || true
     mkdir -p "$STATE_DIR"
     chmod 0777 "$STATE_DIR" 2>/dev/null || true
+}
+
+remove_optional_helpers() {
+    systemctl disable --now "$BOOT_BEEP_SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$BOOT_BEEP_SERVICE" /usr/local/sbin/boot-beep4.py 2>/dev/null || true
+    rm -f "$HELPER_BIN_DIR/fan-100" \
+          "$HELPER_BIN_DIR/fan-60" \
+          "$HELPER_BIN_DIR/fan-auto" \
+          "$HELPER_BIN_DIR/gpu-full" \
+          "$HELPER_BIN_DIR/gpu-idle" 2>/dev/null || true
+    systemctl daemon-reload || true
 }
 
 nvidia_uninstall_best_effort() {
@@ -446,32 +454,38 @@ nvidia_uninstall_best_effort() {
 
     rm -rf /usr/local/src/cmp90hx-pwner /usr/local/src/cmp90hx-rejoin17 /usr/src/nvidia-* /var/lib/dkms/nvidia 2>/dev/null || true
     rm -f /etc/ld.so.conf.d/nvidia*.conf /etc/OpenCL/vendors/nvidia.icd 2>/dev/null || true
-    command -v ldconfig >/dev/null 2>&1 && ldconfig || true
+    rm -f /usr/bin/nvidia-smi /usr/bin/nvidia-debugdump /usr/bin/nvidia-persistenced /usr/bin/nvidia-settings /usr/bin/nvidia-uninstall /usr/bin/nvidia-modprobe 2>/dev/null || true
+    rm -f /var/tmp/NVIDIA-Linux-x86_64-*.run 2>/dev/null || true
+
+    ldconfig 2>/dev/null || true
     depmod -a || true
     command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true
 }
 
+
 download_with_retry() {
-    local url="$1" out="$2" attempts delay tmp
+    local url="$1" out="$2" tmp attempts delay
     attempts="${DOWNLOAD_ATTEMPTS:-10}"
-    delay="${DOWNLOAD_RETRY_DELAY:-10}"
+    delay="${DOWNLOAD_RETRY_DELAY:-8}"
     tmp="${out}.part"
+    mkdir -p "$(dirname "$out")"
 
     for ((i=1; i<=attempts; i++)); do
         printf 'download attempt %s/%s: %s\n' "$i" "$attempts" "$url"
-        if command -v wget >/dev/null 2>&1; then
-            if wget --tries=1 --timeout=30 --read-timeout=60 --continue -O "$tmp" "$url"; then
+        rm -f "$tmp"
+        if command -v curl >/dev/null 2>&1; then
+            if curl -fL --connect-timeout 30 --retry 2 --retry-delay 5 --retry-all-errors -o "$tmp" "$url"; then
                 mv -f "$tmp" "$out"
                 return 0
             fi
-        elif command -v curl >/dev/null 2>&1; then
-            if curl -L --connect-timeout 30 --retry 0 -o "$tmp" "$url"; then
+        elif command -v wget >/dev/null 2>&1; then
+            if wget --tries=3 --waitretry=5 --timeout=30 --read-timeout=60 -O "$tmp" "$url"; then
                 mv -f "$tmp" "$out"
                 return 0
             fi
         else
-            printf 'wget/curl missing\n'
-            return 2
+            printf 'curl/wget missing\n'
+            return 127
         fi
         printf 'download failed, retry in %ss\n' "$delay"
         sleep "$delay"
@@ -613,7 +627,9 @@ verify_compute(){
     return 20
 }
 verify_all(){
-    verify_compute && verify_gen2
+    # Do not run compute verification before the first apply attempt.
+    # On CMP 90HX the working sequence is handoff -> minimal/register writes -> retrain -> verify.
+    verify_gen2 && verify_compute
 }
 apply(){ bash "$APPLY_SCRIPT"; }
 start=$(date +%s)
@@ -622,14 +638,20 @@ log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s interval=${INTERVA
 while true; do
     now=$(date +%s)
     elapsed=$((now - start))
-    if verify_all; then
-        log "compute + Gen2 verified after ${elapsed}s"
-        write_status OK "$elapsed"
-        exit 0
+
+    if verify_gen2; then
+        if verify_compute; then
+            log "compute + Gen2 verified after ${elapsed}s"
+            write_status OK "$elapsed"
+            exit 0
+        fi
+        log "Gen2 is present, compute verification is not complete yet"
     fi
+
     log "apply attempt ${attempt}, elapsed ${elapsed}s"
     apply || true
     sleep 5
+
     now=$(date +%s)
     elapsed=$((now - start))
     if verify_all; then
@@ -637,6 +659,7 @@ while true; do
         write_status OK "$elapsed"
         exit 0
     fi
+
     if (( elapsed >= MAX_WAIT )); then
         log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
         write_status FAIL "$elapsed"
@@ -963,13 +986,14 @@ clean_install_unlock() {
 
 uninstall_all() {
     STEP_NO=0
-    TOTAL_STEPS=8
+    TOTAL_STEPS=9
     clear_left
     banner
     warn 'UNINSTALL removes runtime, boot hook, login notice, patched driver and NVIDIA driver files.'
     warn 'A reboot is required; current PCIe link can remain Gen2 until the next boot.'
     run_step 'stop services' stop_gpu_users || true
     run_step 'remove pwner runtime' purge_old_pwner || true
+    run_step 'remove optional helpers' remove_optional_helpers || true
     run_step 'remove NVIDIA driver' nvidia_uninstall_best_effort || true
     run_step 'remove nouveau blacklist' remove_bootloader_nouveau_blacklist || true
     run_step 'sanitize depmod' sanitize_depmod || true
@@ -1049,6 +1073,7 @@ PY_BEEP4
 [Unit]
 Description=Four PC speaker beeps after successful boot
 After=multi-user.target
+ConditionPathExists=/usr/local/sbin/boot-beep4.py
 
 [Service]
 Type=oneshot
