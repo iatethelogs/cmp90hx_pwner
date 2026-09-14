@@ -537,6 +537,48 @@ install_patched_driver() {
     depmod -a
 }
 
+patch_minimal_retry() {
+    local p patched=0
+    for p in "$PREFIX/cmp90hx-gen2-minimal.sh" "$PROJECT_DIR/scripts/cmp90hx-gen2-minimal.sh"; do
+        [[ -f "$p" ]] || continue
+        python3 - "$p" <<'PY_PATCH_MINIMAL_RETRY'
+import re
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+s = p.read_text(errors="replace")
+
+# Only widen the mask-open retry loop. Do not touch register addresses,
+# handoff order, retrain logic, or any other low-level path.
+s2 = re.sub(
+    r'for try in (?:1 2 3 4 5(?: 6)?|\$\(seq 1 "\$\{CMP90HX_MASK_OPEN_TRIES:-\d+\}"\)); do',
+    'for try in $(seq 1 "${CMP90HX_MASK_OPEN_TRIES:-30}"); do',
+    s,
+    count=1,
+)
+if s2 == s:
+    raise SystemExit(f"mask retry loop was not found in {p}")
+
+# The original code sleeps after an unsuccessful readback. Make that delay
+# configurable and a bit longer by default for multi-card systems.
+s2 = re.sub(
+    r'(\[\[ "\$cur" == "0xffffffff" \]\].*?\n)\s*sleep (?:1|"\$\{CMP90HX_MASK_OPEN_SLEEP:-\d+\}")',
+    r'\1        sleep "${CMP90HX_MASK_OPEN_SLEEP:-2}"',
+    s2,
+    count=1,
+    flags=re.S,
+)
+
+p.write_text(s2)
+PY_PATCH_MINIMAL_RETRY
+        chmod +x "$p" 2>/dev/null || true
+        printf 'patched mask open retry loop: %s\n' "$p"
+        patched=1
+    done
+    [[ "$patched" == "1" ]]
+}
+
 preserve_rejoin_verifiers() {
     mkdir -p "$PREFIX"
     local bin check copied=0
@@ -567,21 +609,99 @@ write_apply_script() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 PREFIX="/opt/cmp90hx-gen2"
+MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-2000}"
+INTERVAL="${CMP90HX_APPLY_INTERVAL:-20}"
+
 log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
-find_cmps() { for d in /sys/bus/pci/devices/*; do [[ -f "$d/vendor" && -f "$d/device" ]] || continue; [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"; done | sort; }
-upstream_of() { basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"; }
-card_is_gen2() { local cmp="$1" up speed endpoint upstream; up="$(upstream_of "$cmp")"; speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"; endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"; upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"; [[ "$speed" == *"5.0 GT/s"* ]] && [[ "$endpoint" == *"Speed 5GT/s"* ]] && [[ "$upstream" == *"Speed 5GT/s"* ]]; }
-verify_links() { local cmps cmp up speed width endpoint upstream total=0 okc=0; mapfile -t cmps < <(find_cmps); (( ${#cmps[@]} > 0 )) || { log "no CMP 90HX 10de:220d devices found"; return 2; }; for cmp in "${cmps[@]}"; do total=$((total+1)); up="$(upstream_of "$cmp")"; speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"; width="$(cat "/sys/bus/pci/devices/${cmp}/current_link_width" 2>/dev/null || true)"; endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"; upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"; log "$cmp upstream=$up speed=$speed width=$width"; log "  endpoint $endpoint"; log "  upstream $upstream"; card_is_gen2 "$cmp" && okc=$((okc+1)); done; log "GEN2 $okc/$total"; [[ "$okc" == "$total" ]]; }
+
+find_cmps() {
+    for d in /sys/bus/pci/devices/*; do
+        [[ -f "$d/vendor" && -f "$d/device" ]] || continue
+        [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"
+    done | sort
+}
+
+upstream_of() {
+    basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"
+}
+
+card_is_gen2() {
+    local cmp="$1" up speed endpoint upstream
+    up="$(upstream_of "$cmp")"
+    speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"
+    endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"
+    upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"
+    [[ "$speed" == *"5.0 GT/s"* ]] && [[ "$endpoint" == *"Speed 5GT/s"* ]] && [[ "$upstream" == *"Speed 5GT/s"* ]]
+}
+
+verify_links() {
+    local cmps cmp up speed width endpoint upstream total=0 okc=0
+    mapfile -t cmps < <(find_cmps)
+    (( ${#cmps[@]} > 0 )) || { log "no CMP 90HX 10de:220d devices found"; return 2; }
+
+    for cmp in "${cmps[@]}"; do
+        total=$((total+1))
+        up="$(upstream_of "$cmp")"
+        speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"
+        width="$(cat "/sys/bus/pci/devices/${cmp}/current_link_width" 2>/dev/null || true)"
+        endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"
+        upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"
+        log "$cmp upstream=$up speed=$speed width=$width"
+        log "  endpoint $endpoint"
+        log "  upstream $upstream"
+        card_is_gen2 "$cmp" && okc=$((okc+1))
+    done
+
+    log "GEN2 $okc/$total"
+    [[ "$okc" == "$total" ]]
+}
+
+apply_once() {
+    [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
+    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
+
+    log "handoff"
+    bash "$PREFIX/cmp90hx-gen2-handoff.sh"
+
+    log "Gen2 runtime"
+    bash "$PREFIX/cmp90hx-gen2-minimal.sh"
+
+    sleep 5
+}
+
 [[ "${1:-}" == "--verify-only" ]] && { verify_links; exit $?; }
-verify_links && { log "already Gen2"; exit 0; }
-[[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
-[[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
-log "handoff"
-bash "$PREFIX/cmp90hx-gen2-handoff.sh"
-log "Gen2 runtime"
-bash "$PREFIX/cmp90hx-gen2-minimal.sh"
-sleep 3
-verify_links
+
+if verify_links; then
+    log "already Gen2"
+    exit 0
+fi
+
+start="$(date +%s)"
+pass=1
+
+while true; do
+    now="$(date +%s)"
+    elapsed=$((now - start))
+
+    log "apply pass ${pass}, elapsed ${elapsed}s"
+    apply_once || true
+
+    if verify_links; then
+        log "Gen2 verified after pass ${pass}"
+        exit 0
+    fi
+
+    now="$(date +%s)"
+    elapsed=$((now - start))
+    if (( elapsed >= MAX_WAIT )); then
+        log "FAIL: Gen2 was not verified inside ${MAX_WAIT}s"
+        exit 1
+    fi
+
+    log "not all cards are Gen2 yet; retry in ${INTERVAL}s"
+    sleep "$INTERVAL"
+    pass=$((pass + 1))
+done
 EOF_APPLY
     chmod +x "$APPLY_SCRIPT"
 }
@@ -627,8 +747,7 @@ verify_compute(){
     return 20
 }
 verify_all(){
-    # Do not run compute verification before the first apply attempt.
-    # On CMP 90HX the working sequence is handoff -> minimal/register writes -> retrain -> verify.
+    # Do not run compute verification before the register-write sequence.
     verify_gen2 && verify_compute
 }
 apply(){ bash "$APPLY_SCRIPT"; }
@@ -638,20 +757,14 @@ log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s interval=${INTERVA
 while true; do
     now=$(date +%s)
     elapsed=$((now - start))
-
-    if verify_gen2; then
-        if verify_compute; then
-            log "compute + Gen2 verified after ${elapsed}s"
-            write_status OK "$elapsed"
-            exit 0
-        fi
-        log "Gen2 is present, compute verification is not complete yet"
+    if verify_all; then
+        log "compute + Gen2 verified after ${elapsed}s"
+        write_status OK "$elapsed"
+        exit 0
     fi
-
     log "apply attempt ${attempt}, elapsed ${elapsed}s"
     apply || true
     sleep 5
-
     now=$(date +%s)
     elapsed=$((now - start))
     if verify_all; then
@@ -659,7 +772,6 @@ while true; do
         write_status OK "$elapsed"
         exit 0
     fi
-
     if (( elapsed >= MAX_WAIT )); then
         log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
         write_status FAIL "$elapsed"
@@ -965,7 +1077,7 @@ prompt_reboot_now() {
 
 clean_install_unlock() {
     STEP_NO=0
-    TOTAL_STEPS=12
+    TOTAL_STEPS=13
     clear_left
     banner
     run_step 'backup' backup_state
@@ -976,6 +1088,7 @@ clean_install_unlock() {
     run_step 'block nouveau' blacklist_nouveau
     run_step 'install stock NVIDIA driver' install_stock_driver
     run_step 'install patched driver' install_patched_driver
+    run_step 'increase mask open retries' patch_minimal_retry
     run_step 'preserve rejoin verifier' preserve_rejoin_verifiers
     run_step 'write boot service and login notice' write_runtime_all
     run_step 'apply Gen2 now' apply_now
@@ -1046,12 +1159,25 @@ install_boot_beep() {
 #!/usr/bin/env python3
 import fcntl
 import os
+import sys
 import time
 
 KIOCSOUND = 0x4B2F
 FREQ = 1000
 DIVISOR = int(1193180 / FREQ)
 
+def tty_bell():
+    for name in ("/dev/console", "/dev/tty0"):
+        try:
+            with open(name, "wb", buffering=0) as f:
+                for _ in range(4):
+                    f.write(b"\a")
+                    time.sleep(0.15)
+            return
+        except Exception:
+            pass
+
+used_pcspkr = False
 for dev in ("/dev/console", "/dev/tty0"):
     try:
         fd = os.open(dev, os.O_WRONLY)
@@ -1061,11 +1187,15 @@ for dev in ("/dev/console", "/dev/tty0"):
                 time.sleep(0.15)
                 fcntl.ioctl(fd, KIOCSOUND, 0)
                 time.sleep(0.15)
+            used_pcspkr = True
         finally:
             os.close(fd)
         break
     except Exception:
         pass
+
+if not used_pcspkr:
+    tty_bell()
 PY_BEEP4
     chmod +x /usr/local/sbin/boot-beep4.py
 
@@ -1208,8 +1338,11 @@ Environment:
   AUTO_REBOOT_IF_NOUVEAU=1
   CMP90HX_NO_TUI=1
   CMP90HX_BOOT_MAX_WAIT=2000
-  CMP90HX_BOOT_INTERVAL=20
   CMP90HX_LOGIN_MAX_WAIT=2000
+  CMP90HX_APPLY_MAX_WAIT=2000
+  CMP90HX_MASK_OPEN_TRIES=30
+  CMP90HX_MASK_OPEN_SLEEP=2
+  CMP90HX_BOOT_INTERVAL=20
 EOF_USAGE
 }
 
