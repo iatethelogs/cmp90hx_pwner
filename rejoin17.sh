@@ -581,7 +581,7 @@ PREFIX="/opt/cmp90hx-gen2"
 STATE_DIR="/var/lib/cmp90hx-pwner"
 APPLY_SCRIPT="$PREFIX/rejoin17-apply-all.sh"
 LOG="/var/log/cmp90hx-pwner-boot.log"
-MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-1200}"
+MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-2000}"
 INTERVAL="${CMP90HX_BOOT_INTERVAL:-20}"
 mkdir -p "$STATE_DIR"
 chmod 0777 "$STATE_DIR" 2>/dev/null || true
@@ -661,7 +661,7 @@ Before=nvidia-persistenced.service ollama.service llama.service open-webui.servi
 Type=oneshot
 ExecStart=$BOOT_GATE
 RemainAfterExit=yes
-TimeoutStartSec=1500
+TimeoutStartSec=2000
 StandardOutput=journal+console
 StandardError=journal+console
 
@@ -697,7 +697,7 @@ trap cleanup_lock EXIT
 read_status_field(){ awk -F= -v k="$1" '$1==k {print $2}' "$STATUS" 2>/dev/null | tail -1; }
 
 wait_boot_gate(){
-    local max="${CMP90HX_LOGIN_MAX_WAIT:-1200}" elapsed=0 status_boot status svc
+    local max="${CMP90HX_LOGIN_MAX_WAIT:-2000}" elapsed=0 status_boot status svc
     printf '\n\033[36;1mCMP90HX Pwner\033[0m\n'
     while (( elapsed <= max )); do
         status_boot=""
@@ -1182,9 +1182,9 @@ Usage:
 Environment:
   AUTO_REBOOT_IF_NOUVEAU=1
   CMP90HX_NO_TUI=1
-  CMP90HX_BOOT_MAX_WAIT=1200
+  CMP90HX_BOOT_MAX_WAIT=2000
   CMP90HX_BOOT_INTERVAL=20
-  CMP90HX_LOGIN_MAX_WAIT=1200
+  CMP90HX_LOGIN_MAX_WAIT=2000
 EOF_USAGE
 }
 
