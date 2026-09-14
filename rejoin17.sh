@@ -30,6 +30,8 @@ APPLY_SCRIPT="${PREFIX}/rejoin17-apply-all.sh"
 SSH_PROFILE="/etc/profile.d/cmp90hx-pwner-login.sh"
 NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 NVIDIA_RUN="/var/tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
+HELPER_BIN_DIR="${HELPER_BIN_DIR:-/usr/local/bin}"
+BOOT_BEEP_SERVICE="boot-beep.service"
 
 export LC_ALL=C
 
@@ -146,7 +148,9 @@ menu() {
     ui '1) UNLOCK THIS SHIT\n'
     ui '2) VERIFY\n'
     ui '3) INSTALL CUDA TOOLKIT\n'
-    ui '4) UNINSTALL\n'
+    ui '4) INSTALL 4-BEEP AT START\n'
+    ui '5) INSTALL FAN/GPU HELPERS\n'
+    ui '6) UNINSTALL\n'
     ui '0) EXIT\n\nSelect: '
 }
 
@@ -400,7 +404,10 @@ purge_old_pwner() {
     rm -f "$SSH_PROFILE" \
           /etc/profile.d/cmp90hx-pwner-firstboot.sh \
           /etc/profile.d/cmp90hx-pwner-login.sh 2>/dev/null || true
+    systemctl disable --now "$BOOT_BEEP_SERVICE" 2>/dev/null || true
     rm -f /etc/update-motd.d/99-cmp90hx-pwner 2>/dev/null || true
+    rm -f "/etc/systemd/system/$BOOT_BEEP_SERVICE" /usr/local/sbin/boot-beep4.py 2>/dev/null || true
+    rm -f "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle" 2>/dev/null || true
     rm -rf "$PREFIX" "$RUNTIME_STATE_DIR" "$STATE_DIR" "$PROJECT_DIR" /usr/local/src/cmp90hx-rejoin17 2>/dev/null || true
     rm -f /etc/depmod.d/cmp90hx-gen2.conf /etc/depmod.d/*cmp90hx* /etc/depmod.d/*rejoin* /etc/depmod.d/*pwner* 2>/dev/null || true
     rm -f /etc/modprobe.d/cmp90hx-gen2-noauto.conf /etc/modprobe.d/*cmp90hx* /etc/modprobe.d/*rejoin* /etc/modprobe.d/*pwner* 2>/dev/null || true
@@ -439,38 +446,32 @@ nvidia_uninstall_best_effort() {
 
     rm -rf /usr/local/src/cmp90hx-pwner /usr/local/src/cmp90hx-rejoin17 /usr/src/nvidia-* /var/lib/dkms/nvidia 2>/dev/null || true
     rm -f /etc/ld.so.conf.d/nvidia*.conf /etc/OpenCL/vendors/nvidia.icd 2>/dev/null || true
-    rm -f /usr/bin/nvidia-smi /usr/bin/nvidia-debugdump /usr/bin/nvidia-persistenced /usr/bin/nvidia-settings /usr/bin/nvidia-uninstall /usr/bin/nvidia-modprobe 2>/dev/null || true
-    rm -f /var/tmp/NVIDIA-Linux-x86_64-*.run 2>/dev/null || true
-
-    ldconfig 2>/dev/null || true
+    command -v ldconfig >/dev/null 2>&1 && ldconfig || true
     depmod -a || true
     command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true
 }
 
-
 download_with_retry() {
-    local url="$1" out="$2" tmp attempts delay
+    local url="$1" out="$2" attempts delay tmp
     attempts="${DOWNLOAD_ATTEMPTS:-10}"
-    delay="${DOWNLOAD_RETRY_DELAY:-8}"
+    delay="${DOWNLOAD_RETRY_DELAY:-10}"
     tmp="${out}.part"
-    mkdir -p "$(dirname "$out")"
 
     for ((i=1; i<=attempts; i++)); do
         printf 'download attempt %s/%s: %s\n' "$i" "$attempts" "$url"
-        rm -f "$tmp"
-        if command -v curl >/dev/null 2>&1; then
-            if curl -fL --connect-timeout 30 --retry 2 --retry-delay 5 --retry-all-errors -o "$tmp" "$url"; then
+        if command -v wget >/dev/null 2>&1; then
+            if wget --tries=1 --timeout=30 --read-timeout=60 --continue -O "$tmp" "$url"; then
                 mv -f "$tmp" "$out"
                 return 0
             fi
-        elif command -v wget >/dev/null 2>&1; then
-            if wget --tries=3 --waitretry=5 --timeout=30 --read-timeout=60 -O "$tmp" "$url"; then
+        elif command -v curl >/dev/null 2>&1; then
+            if curl -L --connect-timeout 30 --retry 0 -o "$tmp" "$url"; then
                 mv -f "$tmp" "$out"
                 return 0
             fi
         else
-            printf 'curl/wget missing\n'
-            return 127
+            printf 'wget/curl missing\n'
+            return 2
         fi
         printf 'download failed, retry in %ss\n' "$delay"
         sleep "$delay"
@@ -580,7 +581,7 @@ PREFIX="/opt/cmp90hx-gen2"
 STATE_DIR="/var/lib/cmp90hx-pwner"
 APPLY_SCRIPT="$PREFIX/rejoin17-apply-all.sh"
 LOG="/var/log/cmp90hx-pwner-boot.log"
-MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-420}"
+MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-1200}"
 INTERVAL="${CMP90HX_BOOT_INTERVAL:-20}"
 mkdir -p "$STATE_DIR"
 chmod 0777 "$STATE_DIR" 2>/dev/null || true
@@ -660,7 +661,7 @@ Before=nvidia-persistenced.service ollama.service llama.service open-webui.servi
 Type=oneshot
 ExecStart=$BOOT_GATE
 RemainAfterExit=yes
-TimeoutStartSec=900
+TimeoutStartSec=1500
 StandardOutput=journal+console
 StandardError=journal+console
 
@@ -696,7 +697,7 @@ trap cleanup_lock EXIT
 read_status_field(){ awk -F= -v k="$1" '$1==k {print $2}' "$STATUS" 2>/dev/null | tail -1; }
 
 wait_boot_gate(){
-    local max=480 elapsed=0 status_boot status svc
+    local max="${CMP90HX_LOGIN_MAX_WAIT:-1200}" elapsed=0 status_boot status svc
     printf '\n\033[36;1mCMP90HX Pwner\033[0m\n'
     while (( elapsed <= max )); do
         status_boot=""
@@ -1015,6 +1016,154 @@ show_install_cuda() {
     [[ -t 0 ]] && read -r _ || true
 }
 
+
+install_boot_beep() {
+    cat > /usr/local/sbin/boot-beep4.py <<'PY_BEEP4'
+#!/usr/bin/env python3
+import fcntl
+import os
+import time
+
+KIOCSOUND = 0x4B2F
+FREQ = 1000
+DIVISOR = int(1193180 / FREQ)
+
+for dev in ("/dev/console", "/dev/tty0"):
+    try:
+        fd = os.open(dev, os.O_WRONLY)
+        try:
+            for _ in range(4):
+                fcntl.ioctl(fd, KIOCSOUND, DIVISOR)
+                time.sleep(0.15)
+                fcntl.ioctl(fd, KIOCSOUND, 0)
+                time.sleep(0.15)
+        finally:
+            os.close(fd)
+        break
+    except Exception:
+        pass
+PY_BEEP4
+    chmod +x /usr/local/sbin/boot-beep4.py
+
+    cat > "/etc/systemd/system/${BOOT_BEEP_SERVICE}" <<'EOF_BEEP_UNIT'
+[Unit]
+Description=Four PC speaker beeps after successful boot
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/sbin/modprobe pcspkr
+ExecStart=/usr/local/sbin/boot-beep4.py
+
+[Install]
+WantedBy=multi-user.target
+EOF_BEEP_UNIT
+
+    systemctl daemon-reload
+    systemctl enable "$BOOT_BEEP_SERVICE"
+    systemctl start "$BOOT_BEEP_SERVICE" || true
+}
+
+install_fan_gpu_helpers() {
+    mkdir -p "$HELPER_BIN_DIR"
+
+    cat > "$HELPER_BIN_DIR/fan-100" <<'EOF_FAN100'
+#!/usr/bin/env bash
+set -u
+if ! command -v nvidia-settings >/dev/null 2>&1; then
+    echo "nvidia-settings is missing"
+    exit 1
+fi
+export DISPLAY="${DISPLAY:-:0}"
+for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
+    nvidia-settings -a "[gpu:${g}]/GPUFanControlState=1" || true
+    nvidia-settings -a "[fan:${g}]/GPUTargetFanSpeed=100" || true
+done
+EOF_FAN100
+
+    cat > "$HELPER_BIN_DIR/fan-60" <<'EOF_FAN60'
+#!/usr/bin/env bash
+set -u
+if ! command -v nvidia-settings >/dev/null 2>&1; then
+    echo "nvidia-settings is missing"
+    exit 1
+fi
+export DISPLAY="${DISPLAY:-:0}"
+for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
+    nvidia-settings -a "[gpu:${g}]/GPUFanControlState=1" || true
+    nvidia-settings -a "[fan:${g}]/GPUTargetFanSpeed=60" || true
+done
+EOF_FAN60
+
+    cat > "$HELPER_BIN_DIR/fan-auto" <<'EOF_FANAUTO'
+#!/usr/bin/env bash
+set -u
+if ! command -v nvidia-settings >/dev/null 2>&1; then
+    echo "nvidia-settings is missing"
+    exit 1
+fi
+export DISPLAY="${DISPLAY:-:0}"
+for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
+    nvidia-settings -a "[gpu:${g}]/GPUFanControlState=0" || true
+done
+EOF_FANAUTO
+
+    cat > "$HELPER_BIN_DIR/gpu-full" <<'EOF_GPUFULL'
+#!/usr/bin/env bash
+set -u
+command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is missing"; exit 1; }
+for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
+    nvidia-smi -i "$g" -pm 1 || true
+    max_pl=$(nvidia-smi -i "$g" --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | awk '{print int($1)}')
+    if [[ "$max_pl" =~ ^[0-9]+$ && "$max_pl" -gt 0 ]]; then
+        nvidia-smi -i "$g" -pl "$max_pl" || true
+    fi
+    nvidia-smi -i "$g" -rgc || true
+done
+EOF_GPUFULL
+
+    cat > "$HELPER_BIN_DIR/gpu-idle" <<'EOF_GPUIDLE'
+#!/usr/bin/env bash
+set -u
+command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is missing"; exit 1; }
+IDLE_POWER_LIMIT="${GPU_IDLE_POWER_LIMIT:-120}"
+MIN_CLOCK="${GPU_IDLE_MIN_CLOCK:-210}"
+MAX_CLOCK="${GPU_IDLE_MAX_CLOCK:-300}"
+for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
+    nvidia-smi -i "$g" -pm 1 || true
+    nvidia-smi -i "$g" -pl "$IDLE_POWER_LIMIT" || true
+    nvidia-smi -i "$g" -lgc "$MIN_CLOCK,$MAX_CLOCK" || true
+done
+EOF_GPUIDLE
+
+    chmod +x "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle"
+
+    printf 'installed helpers:\n'
+    ls -l "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle"
+}
+
+show_install_boot_beep() {
+    STEP_NO=0
+    TOTAL_STEPS=1
+    clear_left
+    banner
+    run_step 'install 4-beep at start' install_boot_beep
+    ok '4-BEEP INSTALLED'
+    ui '\nPress Enter to return: '
+    [[ -t 0 ]] && read -r _ || true
+}
+
+show_install_helpers() {
+    STEP_NO=0
+    TOTAL_STEPS=1
+    clear_left
+    banner
+    run_step 'install fan/gpu helpers' install_fan_gpu_helpers
+    ok 'FAN/GPU HELPERS INSTALLED'
+    ui '\nPress Enter to return: '
+    [[ -t 0 ]] && read -r _ || true
+}
+
 usage() {
     cat <<EOF_USAGE
 $PROGRAM_NAME
@@ -1025,14 +1174,17 @@ Usage:
   sudo ./rejoin17.sh --unlock-this-shit
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
+  sudo ./rejoin17.sh --install-beep
+  sudo ./rejoin17.sh --install-helpers
   sudo ./rejoin17.sh --uninstall
   sudo ./rejoin17.sh --no-tui --verify
 
 Environment:
   AUTO_REBOOT_IF_NOUVEAU=1
   CMP90HX_NO_TUI=1
-  CMP90HX_BOOT_MAX_WAIT=420
+  CMP90HX_BOOT_MAX_WAIT=1200
   CMP90HX_BOOT_INTERVAL=20
+  CMP90HX_LOGIN_MAX_WAIT=1200
 EOF_USAGE
 }
 
@@ -1041,6 +1193,8 @@ main() {
         --unlock-this-shit|--unlock) clean_install_unlock ;;
         --verify|--status) show_verify ;;
         --install-cuda|--cuda) show_install_cuda ;;
+        --install-beep|--beep) show_install_boot_beep ;;
+        --install-helpers|--helpers|--fan-scripts|--gpu-scripts) show_install_helpers ;;
         --uninstall|--rollback|--remove|--cancel) uninstall_all ;;
         --help|-h) usage ;;
         '')
@@ -1051,7 +1205,9 @@ main() {
                     1) clean_install_unlock ;;
                     2) show_verify ;;
                     3) show_install_cuda ;;
-                    4)
+                    4) show_install_boot_beep ;;
+                    5) show_install_helpers ;;
+                    6)
                         ui 'Type UNINSTALL to remove everything: '
                         IFS= read -r confirm
                         [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'
