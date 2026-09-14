@@ -97,7 +97,7 @@ sudo AUTO_REBOOT_IF_NOUVEAU=1 ./rejoin17.sh
 
 Если патчи ещё применяются, при первом входе по SSH появится надпись `WAIT`. Ничего не закрывайте и не запускайте тяжёлые задачи на GPU. Нужно дождаться окончания проверки.
 
-На нескольких картах ожидание может быть долгим. Для пяти карт заложен запас: ожидание до 1200 секунд, системный таймаут службы — 1500 секунд.
+На нескольких картах ожидание может быть долгим. В скрипте заложен запас: ожидание до 2000 секунд, системный таймаут службы — 2000 секунд.
 
 Когда всё готово, появится котик и сообщение:
 
@@ -225,7 +225,7 @@ After a successful installation, the script will offer to reboot the system.
 
 If the patches are still being applied, you will see `WAIT` when you first log in over SSH. Do not close anything or start any heavy GPU workloads. Wait until the verification process finishes.
 
-On multi-card systems, waiting may take a long time. For five cards, the script allows up to 1200 seconds of waiting and uses a 1500-second systemd service timeout.
+On multi-card systems, waiting may take a long time. The script allows up to 2000 seconds of waiting and uses a 2000-second systemd service timeout.
 
 When everything is ready, a cat and the following message will appear:
 
