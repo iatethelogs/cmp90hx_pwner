@@ -126,7 +126,7 @@ draw_banner() {
      /  _/  /   | /_  __// ____/  /_  __// / / // ____/  / /   / __ \/ ____/ ___/  / // // /
      / /   / /| |  / /  / __/      / /  / /_/ // __/    / /   / / / / / __ \__ \  / // // /
    _/ /   / ___ | / /  / /___     / /  / __  // /___   / /___/ /_/ / /_/ /___/ / /_//_//_/
-  /___/  /_/  |_|/_/  /_____/    /_/  /_/ /_//_____/  /_____/\____/\____//____/ (_)(_) (_)
+  /___/  /_/  |_|/_/  /_____/    /_/  /_/ /_//_____/  /_____ /\____/\____//____/ (_)(_) (_)
 
 EOF_BANNER
     ui '%b' "$RST"
@@ -537,48 +537,245 @@ install_patched_driver() {
     depmod -a
 }
 
-patch_minimal_retry() {
-    local p patched=0
+
+write_adaptive_gen2_minimal() {
+    mkdir -p "$PREFIX"
+    local p wrote=0
+
     for p in "$PREFIX/cmp90hx-gen2-minimal.sh" "$PROJECT_DIR/scripts/cmp90hx-gen2-minimal.sh"; do
         [[ -f "$p" ]] || continue
-        python3 - "$p" <<'PY_PATCH_MINIMAL_RETRY'
-import re
-import sys
-from pathlib import Path
+        cp -a "$p" "${p}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
+        cat > "$p" <<'EOF_GEN2_MINIMAL'
+#!/usr/bin/env bash
+# CMP 90HX PCIe Gen2 unlock - adaptive 2-mask apply.
+# Register addresses and base order are intentionally unchanged:
+#   outer wrapper: handoff -> this script -> verify
+#   0x00823800 FEAT_OVR_ECC_PLM
+#   0x00088fe8 XVE privilege mask
+set -uo pipefail
 
-p = Path(sys.argv[1])
-s = p.read_text(errors="replace")
+PREFIX="${CMP90_PREFIX:-/opt/cmp90hx-gen2}"
+CYCLE="${CMP90_CYCLE:-$PREFIX/rejoin16-cycle.sh}"
+READER="${CMP90_READER:-$PREFIX/maskread.py}"
+HANDOFF="${CMP90_HANDOFF:-$PREFIX/cmp90hx-gen2-handoff.sh}"
+MASK_FEAT_ECC=0x00823800
+MASK_XVE=0x00088fe8
+MASK_OPEN_TRIES="${CMP90HX_MASK_OPEN_TRIES:-60}"
+OPEN_REHANDOFF="${CMP90HX_OPEN_REHANDOFF:-1}"
+PCI_RESET="${CMP90HX_PCI_RESET:-0}"
+RESET_ON_STUCK="${CMP90HX_RESET_ON_STUCK:-1}"
+STUCK_REPEAT_LIMIT="${CMP90HX_STUCK_REPEAT_LIMIT:-8}"
+RESET_DONE_DIR="${CMP90HX_RESET_DONE_DIR:-/run/cmp90hx-gen2-reset-done}"
 
-# Only widen the mask-open retry loop. Do not touch register addresses,
-# handoff order, retrain logic, or any other low-level path.
-s2 = re.sub(
-    r'for try in (?:1 2 3 4 5(?: 6)?|\$\(seq 1 "\$\{CMP90HX_MASK_OPEN_TRIES:-\d+\}"\)); do',
-    'for try in $(seq 1 "${CMP90HX_MASK_OPEN_TRIES:-30}"); do',
-    s,
-    count=1,
-)
-if s2 == s:
-    raise SystemExit(f"mask retry loop was not found in {p}")
+log() { echo "cmp90hx-gen2: $*"; }
 
-# The original code sleeps after an unsuccessful readback. Make that delay
-# configurable and a bit longer by default for multi-card systems.
-s2 = re.sub(
-    r'(\[\[ "\$cur" == "0xffffffff" \]\].*?\n)\s*sleep (?:1|"\$\{CMP90HX_MASK_OPEN_SLEEP:-\d+\}")',
-    r'\1        sleep "${CMP90HX_MASK_OPEN_SLEEP:-2}"',
-    s2,
-    count=1,
-    flags=re.S,
-)
-
-p.write_text(s2)
-PY_PATCH_MINIMAL_RETRY
-        chmod +x "$p" 2>/dev/null || true
-        printf 'patched mask open retry loop: %s\n' "$p"
-        patched=1
-    done
-    [[ "$patched" == "1" ]]
+mask_val() {  # <bdf> <addr> -> value
+    python3 "$READER" "$1" "$2" 2>/dev/null | awk '{print $1}'
 }
 
+upstream_of() { # <bdf>
+    basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"
+}
+
+retrain_gen2() {   # <bdf>
+    local bdf="$1" up lc nc
+    up="$(upstream_of "$bdf")"
+    log "  $bdf retrain target Gen2"
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 2
+}
+
+retrain_gen1_then_gen2() { # <bdf>
+    local bdf="$1" up lc nc
+    up="$(upstream_of "$bdf")"
+    log "  $bdf speed-pulse Gen1 -> Gen2"
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0001 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0001 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 2
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 3
+}
+
+nvidia_wake() { # <bdf>
+    local bdf="$1"
+    log "  $bdf nvidia-smi settle"
+    nvidia-smi --query-gpu=pci.bus_id,pcie.link.gen.current --format=csv,noheader,nounits >/dev/null 2>&1 || true
+    sleep 2
+}
+
+soft_rehandoff() { # <bdf>
+    local bdf="$1"
+    [[ "$OPEN_REHANDOFF" == "1" ]] || return 0
+    [[ -x "$HANDOFF" ]] || return 0
+    log "  $bdf full handoff refresh"
+    bash "$HANDOFF" || true
+    sleep 4
+}
+
+pci_function_reset_once() { # <bdf> <addr>
+    local bdf="$1" addr="$2" dev="/sys/bus/pci/devices/$1" key
+    [[ "$PCI_RESET" == "1" && "$RESET_ON_STUCK" == "1" ]] || return 0
+    [[ -w "$dev/reset" ]] || { log "  $bdf PCI reset unavailable"; return 0; }
+    mkdir -p "$RESET_DONE_DIR" 2>/dev/null || true
+    key="${bdf//[:.]/_}_${addr}"
+    [[ ! -e "$RESET_DONE_DIR/$key" ]] || { log "  $bdf PCI reset already used for $addr in this run"; return 0; }
+    : > "$RESET_DONE_DIR/$key" 2>/dev/null || true
+    log "  $bdf PCI function reset for stuck $addr"
+    echo 1 > "$dev/reset" 2>/dev/null || true
+    sleep 8
+    retrain_gen2 "$bdf"
+    soft_rehandoff "$bdf"
+}
+
+settle_for_try() { # <try>
+    local t="$1"
+    case $(( (t - 1) % 10 )) in
+        0) printf '0' ;;
+        1) printf '0.25' ;;
+        2) printf '0.5' ;;
+        3) printf '1' ;;
+        4) printf '2' ;;
+        5) printf '3' ;;
+        6) printf '5' ;;
+        7) printf '8' ;;
+        8) printf '13' ;;
+        *) printf '1' ;;
+    esac
+}
+
+try_prepare() { # <bdf> <try>
+    local bdf="$1" try="$2"
+    case $(( try % 18 )) in
+        3|11)
+            log "  $bdf try $try: pre-retrain"
+            retrain_gen2 "$bdf"
+            ;;
+        5|13)
+            log "  $bdf try $try: speed-pulse"
+            retrain_gen1_then_gen2 "$bdf"
+            ;;
+        7)
+            log "  $bdf try $try: nvidia settle"
+            nvidia_wake "$bdf"
+            ;;
+        9)
+            log "  $bdf try $try: longer quiet settle"
+            sleep 10
+            ;;
+        15)
+            log "  $bdf try $try: handoff refresh"
+            soft_rehandoff "$bdf"
+            ;;
+        0)
+            log "  $bdf try $try: reset stage if enabled"
+            ;;
+    esac
+}
+
+open_mask() { # <bdf> <addr>
+    local bdf="$1" addr="$2" try cur delay old_cur repeat_count=0
+
+    cur="$(mask_val "$bdf" "$addr")"
+    [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr already OK"; return 0; }
+    old_cur="$cur"
+
+    for try in $(seq 1 "$MASK_OPEN_TRIES"); do
+        try_prepare "$bdf" "$try"
+
+        CMP90_BDF="$bdf" bash "$CYCLE" "$addr" 0xffffffff >/dev/null 2>&1 || true
+
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try immediate)"; return 0; }
+
+        sleep 0.25
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try delayed-250ms)"; return 0; }
+
+        sleep 1
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try delayed-1s)"; return 0; }
+
+        if [[ "$cur" == "$old_cur" ]]; then
+            repeat_count=$((repeat_count + 1))
+        else
+            repeat_count=0
+            old_cur="$cur"
+        fi
+
+        if (( repeat_count == STUCK_REPEAT_LIMIT )); then
+            log "  $bdf open $addr readback stuck at ${cur:-none}; handoff refresh"
+            soft_rehandoff "$bdf"
+        fi
+
+        if (( repeat_count == STUCK_REPEAT_LIMIT + 4 )); then
+            log "  $bdf open $addr still stuck at ${cur:-none}; reset stage"
+            pci_function_reset_once "$bdf" "$addr"
+            repeat_count=0
+        fi
+
+        delay="$(settle_for_try "$try")"
+        log "  $bdf open $addr try $try readback=${cur:-none}; sleep ${delay}s"
+        sleep "$delay"
+    done
+
+    cur="$(mask_val "$bdf" "$addr")"
+    log "  $bdf open $addr FAIL (readback=${cur:-none})"
+    return 1
+}
+
+mapfile -t BDFS < <(lspci -Dnn | awk '/10de:220d/ {print $1}')
+if [[ "${#BDFS[@]}" -eq 0 ]]; then
+    log "no CMP 90HX found; nothing to do"
+    exit 0
+fi
+
+log "mode: tries=$MASK_OPEN_TRIES pci_reset=$PCI_RESET rehandoff=$OPEN_REHANDOFF stuck_repeat_limit=$STUCK_REPEAT_LIMIT"
+
+for bdf in "${BDFS[@]}"; do
+    m_feat="$(mask_val "$bdf" "$MASK_FEAT_ECC")"
+    m_xve="$(mask_val "$bdf" "$MASK_XVE")"
+    log "$bdf masks feat_ecc=$m_feat xve=$m_xve"
+
+    if [[ "$m_feat" == "0xffffffff" && "$m_xve" == "0xffffffff" ]]; then
+        log "  masks already open - no reload cycles needed"
+    else
+        [[ "$m_feat" == "0xffffffff" ]] || open_mask "$bdf" "$MASK_FEAT_ECC" || true
+        [[ "$m_xve"  == "0xffffffff" ]] || open_mask "$bdf" "$MASK_XVE"      || true
+    fi
+
+    retrain_gen2 "$bdf"
+    spd="$(cat "/sys/bus/pci/devices/${bdf}/current_link_speed" 2>/dev/null)"
+    gen="$(nvidia-smi --query-gpu=pcie.link.gen.current,pci.bus_id --format=csv,noheader,nounits 2>/dev/null \
+           | awk -v b="${bdf#0000:}" '$2 ~ b {print $1; exit}')"
+    log "  $bdf link=${spd:-?} gen=${gen:-?}"
+done
+log "done"
+exit 0
+EOF_GEN2_MINIMAL
+        chmod +x "$p" 2>/dev/null || true
+        printf 'installed adaptive/rescue mask opener: %s\n' "$p"
+        wrote=1
+    done
+
+    [[ "$wrote" == "1" ]]
+}
 preserve_rejoin_verifiers() {
     mkdir -p "$PREFIX"
     local bin check copied=0
@@ -609,8 +806,9 @@ write_apply_script() {
 #!/usr/bin/env bash
 set -Eeuo pipefail
 PREFIX="/opt/cmp90hx-gen2"
-MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-2000}"
-INTERVAL="${CMP90HX_APPLY_INTERVAL:-20}"
+MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-3600}"
+INTERVAL="${CMP90HX_APPLY_INTERVAL:-30}"
+MASK_TRIES="${CMP90HX_MASK_OPEN_TRIES:-60}"
 
 log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
 
@@ -634,8 +832,17 @@ card_is_gen2() {
     [[ "$speed" == *"5.0 GT/s"* ]] && [[ "$endpoint" == *"Speed 5GT/s"* ]] && [[ "$upstream" == *"Speed 5GT/s"* ]]
 }
 
+failed_cards() {
+    local cmps cmp out=()
+    mapfile -t cmps < <(find_cmps)
+    for cmp in "${cmps[@]}"; do
+        card_is_gen2 "$cmp" || out+=("$cmp")
+    done
+    printf '%s\n' "${out[@]}"
+}
+
 verify_links() {
-    local cmps cmp up speed width endpoint upstream total=0 okc=0
+    local cmps cmp up speed width endpoint upstream total=0 okc=0 failed=()
     mapfile -t cmps < <(find_cmps)
     (( ${#cmps[@]} > 0 )) || { log "no CMP 90HX 10de:220d devices found"; return 2; }
 
@@ -649,24 +856,50 @@ verify_links() {
         log "$cmp upstream=$up speed=$speed width=$width"
         log "  endpoint $endpoint"
         log "  upstream $upstream"
-        card_is_gen2 "$cmp" && okc=$((okc+1))
+        if card_is_gen2 "$cmp"; then
+            okc=$((okc+1))
+        else
+            failed+=("$cmp")
+        fi
     done
 
     log "GEN2 $okc/$total"
+    if (( ${#failed[@]} > 0 )); then
+        log "not Gen2 yet: ${failed[*]}"
+    fi
     [[ "$okc" == "$total" ]]
 }
 
-apply_once() {
+handoff() {
     [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
-    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
-
     log "handoff"
     bash "$PREFIX/cmp90hx-gen2-handoff.sh"
+}
 
-    log "Gen2 runtime"
+run_minimal() { # <label> <pci_reset>
+    local label="$1" pci_reset="$2"
+    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
+    log "Gen2 runtime: ${label} pci_reset=${pci_reset} tries=${MASK_TRIES}"
+    CMP90HX_PCI_RESET="$pci_reset" \
+    CMP90HX_MASK_OPEN_TRIES="$MASK_TRIES" \
     bash "$PREFIX/cmp90hx-gen2-minimal.sh"
-
     sleep 5
+}
+
+soft_pass() { # <label>
+    local label="$1"
+    log "=== ${label}: handoff -> adaptive minimal -> verify ==="
+    handoff
+    run_minimal "$label" 0 || true
+    verify_links
+}
+
+rescue_pass() {
+    log "=== rescue: handoff -> adaptive minimal with targeted PCI reset -> verify ==="
+    handoff
+    CMP90HX_PCI_RESET=1 CMP90HX_MASK_OPEN_TRIES="$MASK_TRIES" bash "$PREFIX/cmp90hx-gen2-minimal.sh" || true
+    sleep 5
+    verify_links
 }
 
 [[ "${1:-}" == "--verify-only" ]] && { verify_links; exit $?; }
@@ -677,17 +910,29 @@ if verify_links; then
 fi
 
 start="$(date +%s)"
-pass=1
+cycle=1
 
 while true; do
     now="$(date +%s)"
     elapsed=$((now - start))
+    log "convergence cycle ${cycle}, elapsed ${elapsed}s/${MAX_WAIT}s"
 
-    log "apply pass ${pass}, elapsed ${elapsed}s"
-    apply_once || true
+    if soft_pass "adaptive pass ${cycle}"; then
+        log "Gen2 verified after adaptive pass ${cycle}"
+        exit 0
+    fi
 
-    if verify_links; then
-        log "Gen2 verified after pass ${pass}"
+    mapfile -t failed < <(failed_cards)
+    log "adaptive pass ${cycle} left non-Gen2 cards: ${failed[*]:-none}"
+
+    if rescue_pass; then
+        log "rescue pass reached Gen2; running mandatory final soft pass"
+    else
+        log "rescue pass did not leave all cards Gen2; running mandatory final soft pass anyway"
+    fi
+
+    if soft_pass "final soft pass ${cycle}"; then
+        log "Gen2 verified after rescue + final soft pass ${cycle}"
         exit 0
     fi
 
@@ -698,14 +943,14 @@ while true; do
         exit 1
     fi
 
-    log "not all cards are Gen2 yet; retry in ${INTERVAL}s"
+    mapfile -t failed < <(failed_cards)
+    log "cycle ${cycle} incomplete; still not Gen2: ${failed[*]:-unknown}; retry in ${INTERVAL}s"
     sleep "$INTERVAL"
-    pass=$((pass + 1))
+    cycle=$((cycle + 1))
 done
 EOF_APPLY
     chmod +x "$APPLY_SCRIPT"
 }
-
 write_boot_gate() {
     mkdir -p "$PREFIX" "$STATE_DIR"
     cat > "$BOOT_GATE" <<'EOF_BOOT_GATE'
@@ -715,21 +960,22 @@ PREFIX="/opt/cmp90hx-gen2"
 STATE_DIR="/var/lib/cmp90hx-pwner"
 APPLY_SCRIPT="$PREFIX/rejoin17-apply-all.sh"
 LOG="/var/log/cmp90hx-pwner-boot.log"
-MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-2000}"
-INTERVAL="${CMP90HX_BOOT_INTERVAL:-20}"
+MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-3600}"
 mkdir -p "$STATE_DIR"
 chmod 0777 "$STATE_DIR" 2>/dev/null || true
 exec >>"$LOG" 2>&1
 log(){ printf '[%s] %s\n' "$(date -Is)" "$*"; }
 boot_id(){ cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown; }
 write_status(){
-    local status="$1" elapsed="$2"
+    local status="$1" elapsed="$2" last="${3:-}"
+    last="${last//$'\n'/ }"
     {
         printf 'boot_id=%s\n' "$(boot_id)"
         printf 'status=%s\n' "$status"
         printf 'elapsed=%s\n' "$elapsed"
         printf 'time=%s\n' "$(date -Is)"
         printf 'log=%s\n' "$LOG"
+        printf 'last=%s\n' "$last"
     } > "$STATE_DIR/boot-status"
     chmod 0666 "$STATE_DIR/boot-status" 2>/dev/null || true
 }
@@ -746,44 +992,44 @@ verify_compute(){
     log "no rejoin compute verifier found"
     return 20
 }
-verify_all(){
-    # Do not run compute verification before the register-write sequence.
-    verify_gen2 && verify_compute
+run_apply_with_status(){
+    local rc line now elapsed
+    set +e
+    CMP90HX_APPLY_MAX_WAIT="$MAX_WAIT" bash "$APPLY_SCRIPT" 2>&1 | while IFS= read -r line; do
+        now=$(date +%s)
+        elapsed=$((now - start))
+        log "$line"
+        write_status RUNNING "$elapsed" "$line"
+    done
+    rc=${PIPESTATUS[0]}
+    set -e
+    return "$rc"
 }
-apply(){ bash "$APPLY_SCRIPT"; }
 start=$(date +%s)
-attempt=1
-log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s interval=${INTERVAL}s"
-while true; do
+log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s"
+write_status RUNNING 0 "boot gate start; waiting for adaptive Gen2 sequence"
+
+# Do not run compute verification before the first register-write sequence.
+# The stable order is: handoff -> minimal/register writes -> retrain -> verify.
+if run_apply_with_status; then
     now=$(date +%s)
     elapsed=$((now - start))
-    if verify_all; then
+    if verify_gen2 && verify_compute; then
         log "compute + Gen2 verified after ${elapsed}s"
-        write_status OK "$elapsed"
+        write_status OK "$elapsed" "compute + Gen2 verified"
         exit 0
     fi
-    log "apply attempt ${attempt}, elapsed ${elapsed}s"
-    apply || true
-    sleep 5
-    now=$(date +%s)
-    elapsed=$((now - start))
-    if verify_all; then
-        log "compute + Gen2 verified after apply, elapsed ${elapsed}s"
-        write_status OK "$elapsed"
-        exit 0
-    fi
-    if (( elapsed >= MAX_WAIT )); then
-        log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
-        write_status FAIL "$elapsed"
-        exit 1
-    fi
-    sleep "$INTERVAL"
-    attempt=$((attempt + 1))
-done
+    log "Gen2 apply finished, but final compute/link verification did not pass"
+fi
+
+now=$(date +%s)
+elapsed=$((now - start))
+log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
+write_status FAIL "$elapsed" "compute + Gen2 were not verified; see $LOG"
+exit 1
 EOF_BOOT_GATE
     chmod +x "$BOOT_GATE"
 }
-
 write_systemd_service() {
     cat > "/etc/systemd/system/$SERVICE_NAME" <<EOF_SERVICE
 [Unit]
@@ -796,7 +1042,7 @@ Before=nvidia-persistenced.service ollama.service llama.service open-webui.servi
 Type=oneshot
 ExecStart=$BOOT_GATE
 RemainAfterExit=yes
-TimeoutStartSec=2000
+TimeoutStartSec=4200
 StandardOutput=journal+console
 StandardError=journal+console
 
@@ -829,24 +1075,37 @@ mkdir "$LOCK" 2>/dev/null || return 0 2>/dev/null || true
 cleanup_lock(){ rmdir "$LOCK" 2>/dev/null || true; }
 trap cleanup_lock EXIT
 
-read_status_field(){ awk -F= -v k="$1" '$1==k {print $2}' "$STATUS" 2>/dev/null | tail -1; }
+read_status_field(){ awk -v k="$1" 'index($0,k"=")==1 {sub("^[^=]*=", ""); print}' "$STATUS" 2>/dev/null | tail -1; }
+shorten_line(){
+    local s="$1" max="${2:-110}"
+    s="${s//$'\n'/ }"
+    if [ "${#s}" -gt "$max" ]; then
+        printf '%s…' "${s:0:$((max-1))}"
+    else
+        printf '%s' "$s"
+    fi
+}
 
 wait_boot_gate(){
-    local max="${CMP90HX_LOGIN_MAX_WAIT:-2000}" elapsed=0 status_boot status svc
+    local max="${CMP90HX_LOGIN_MAX_WAIT:-3600}" elapsed=0 status_boot status svc last log_path shown
     printf '\n\033[36;1mCMP90HX Pwner\033[0m\n'
     while (( elapsed <= max )); do
         status_boot=""
         status=""
+        last=""
+        log_path=""
         if [ -r "$STATUS" ]; then
             status_boot="$(read_status_field boot_id)"
             status="$(read_status_field status)"
+            last="$(read_status_field last)"
+            log_path="$(read_status_field log)"
             if [ "$status_boot" = "$BOOT_ID" ]; then
                 if [ "$status" = "OK" ]; then
                     printf '\r\033[K\033[32;1m[ OK ]\033[0m boot verify passed after %ss\n' "$elapsed"
                     return 0
                 fi
                 if [ "$status" = "FAIL" ]; then
-                    printf '\r\033[K\033[31;1m[ FAIL ]\033[0m boot verify failed\n'
+                    printf '\r\033[K\033[31;1m[ FAIL ]\033[0m boot verify failed: %s\n' "$(shorten_line "$last" 100)"
                     return 1
                 fi
             fi
@@ -858,7 +1117,12 @@ wait_boot_gate(){
             return 1
         fi
 
-        printf '\r\033[K\033[33;1m[ WAIT ]\033[0m applying compute unlock + Gen2: %03ds / %03ds' "$elapsed" "$max"
+        if [ -z "$last" ] && [ -n "$log_path" ] && [ -r "$log_path" ]; then
+            last="$(tail -n 1 "$log_path" 2>/dev/null)"
+        fi
+        [ -n "$last" ] || last="waiting for cmp90hx-gen2 log output"
+        shown="$(shorten_line "$last" 105)"
+        printf '\r\033[K\033[33;1m[ WAIT ]\033[0m Gen2 apply: %04ds / %04ds | %s' "$elapsed" "$max" "$shown"
         sleep 1
         elapsed=$((elapsed + 1))
     done
@@ -894,7 +1158,6 @@ return 0 2>/dev/null || true
 EOF_PROFILE
     chmod 0644 "$SSH_PROFILE"
 }
-
 write_runtime_all() {
     write_apply_script
     write_boot_gate
@@ -1088,7 +1351,7 @@ clean_install_unlock() {
     run_step 'block nouveau' blacklist_nouveau
     run_step 'install stock NVIDIA driver' install_stock_driver
     run_step 'install patched driver' install_patched_driver
-    run_step 'increase mask open retries' patch_minimal_retry
+    run_step 'install adaptive/rescue Gen2 runtime' write_adaptive_gen2_minimal
     run_step 'preserve rejoin verifier' preserve_rejoin_verifiers
     run_step 'write boot service and login notice' write_runtime_all
     run_step 'apply Gen2 now' apply_now
@@ -1159,25 +1422,13 @@ install_boot_beep() {
 #!/usr/bin/env python3
 import fcntl
 import os
-import sys
 import time
 
 KIOCSOUND = 0x4B2F
 FREQ = 1000
 DIVISOR = int(1193180 / FREQ)
 
-def tty_bell():
-    for name in ("/dev/console", "/dev/tty0"):
-        try:
-            with open(name, "wb", buffering=0) as f:
-                for _ in range(4):
-                    f.write(b"\a")
-                    time.sleep(0.15)
-            return
-        except Exception:
-            pass
-
-used_pcspkr = False
+worked = False
 for dev in ("/dev/console", "/dev/tty0"):
     try:
         fd = os.open(dev, os.O_WRONLY)
@@ -1187,15 +1438,13 @@ for dev in ("/dev/console", "/dev/tty0"):
                 time.sleep(0.15)
                 fcntl.ioctl(fd, KIOCSOUND, 0)
                 time.sleep(0.15)
-            used_pcspkr = True
+            worked = True
         finally:
             os.close(fd)
-        break
+        if worked:
+            break
     except Exception:
         pass
-
-if not used_pcspkr:
-    tty_bell()
 PY_BEEP4
     chmod +x /usr/local/sbin/boot-beep4.py
 
@@ -1337,12 +1586,14 @@ Usage:
 Environment:
   AUTO_REBOOT_IF_NOUVEAU=1
   CMP90HX_NO_TUI=1
-  CMP90HX_BOOT_MAX_WAIT=2000
-  CMP90HX_LOGIN_MAX_WAIT=2000
-  CMP90HX_APPLY_MAX_WAIT=2000
-  CMP90HX_MASK_OPEN_TRIES=30
-  CMP90HX_MASK_OPEN_SLEEP=2
+  CMP90HX_BOOT_MAX_WAIT=3600
   CMP90HX_BOOT_INTERVAL=20
+  CMP90HX_LOGIN_MAX_WAIT=3600
+  CMP90HX_APPLY_MAX_WAIT=3600
+  CMP90HX_MASK_OPEN_TRIES=60
+  CMP90HX_MASK_OPEN_SLEEP=2
+  CMP90HX_PCI_RESET=1
+  CMP90HX_OPEN_REHANDOFF=1
 EOF_USAGE
 }
 
