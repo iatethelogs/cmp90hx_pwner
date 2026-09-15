@@ -54,13 +54,7 @@
 
 На чистой Ubuntu Secure Boot должен быть выключен. Во время установки не подключайте монитор к серверу: `nouveau` может занять карту до установки нужного драйвера.
 
-Скачайте один скрипт:
-
-```bash
-wget https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/rejoin17.sh
-chmod +x rejoin17.sh
-sudo AUTO_REBOOT_IF_NOUVEAU=1 ./rejoin17.sh
-```
+Скачайте скрипт.
 
 Сначала один раз выберите:
 
