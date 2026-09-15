@@ -25,6 +25,7 @@ AUTO_REBOOT_IF_NOUVEAU="${AUTO_REBOOT_IF_NOUVEAU:-0}"
 PURGE_NVIDIA_PACKAGES="${PURGE_NVIDIA_PACKAGES:-1}"
 KILL_GPU_PROCS="${KILL_GPU_PROCS:-1}"
 SERVICE_NAME="cmp90hx-gen2.service"
+COMPUTE_SERVICE="cmp90hx-compute.service"
 BOOT_GATE="${PREFIX}/rejoin17-boot-gate.sh"
 APPLY_SCRIPT="${PREFIX}/rejoin17-apply-all.sh"
 SSH_PROFILE="/etc/profile.d/cmp90hx-pwner-login.sh"
@@ -140,15 +141,6 @@ banner() {
     draw_banner
 }
 
-menu() {
-    clear_left
-    banner 1
-    ui '1) UNLOCK THIS SHIT\n'
-    ui '2) VERIFY\n'
-    ui '3) INSTALL CUDA TOOLKIT\n'
-    ui '4) UNINSTALL\n'
-    ui '0) EXIT\n\nSelect: '
-}
 
 STEP_NO=0
 TOTAL_STEPS=1
@@ -389,6 +381,8 @@ PY_REMOVE_GRUB
 }
 
 purge_old_pwner() {
+    systemctl disable --now "$COMPUTE_SERVICE" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$COMPUTE_SERVICE" 2>/dev/null || true
     systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
     systemctl disable --now cmp90hx-pwner-firstboot-ui.service cmp90hx-pwner-ssh-gate.service 2>/dev/null || true
     systemctl unmask ssh.service sshd.service 2>/dev/null || true
@@ -516,6 +510,13 @@ install_patched_driver() {
     mkdir -p "$(dirname "$PROJECT_DIR")"
     git_clone_retry "$PROJECT_REPO" "$PROJECT_DIR"
     cd "$PROJECT_DIR"
+    # Do not let the upstream installer enable the combined boot action.
+    # Fail if its layout changes instead of guessing which commands to remove.
+    grep -qx '# 7. systemd unit' scripts/install.sh || {
+        printf 'upstream installer layout changed: boot-service section not found\n'
+        return 20
+    }
+    sed -i '/^# 7. systemd unit$/,$d' scripts/install.sh
     bash scripts/install.sh
     depmod -a
 }
@@ -544,225 +545,6 @@ preserve_rejoin_verifiers() {
     fi
 }
 
-write_apply_script() {
-    mkdir -p "$PREFIX"
-    cat > "$APPLY_SCRIPT" <<'EOF_APPLY'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-PREFIX="/opt/cmp90hx-gen2"
-log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
-find_cmps() { for d in /sys/bus/pci/devices/*; do [[ -f "$d/vendor" && -f "$d/device" ]] || continue; [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"; done | sort; }
-upstream_of() { basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"; }
-card_is_gen2() { local cmp="$1" up speed endpoint upstream; up="$(upstream_of "$cmp")"; speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"; endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"; upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"; [[ "$speed" == *"5.0 GT/s"* ]] && [[ "$endpoint" == *"Speed 5GT/s"* ]] && [[ "$upstream" == *"Speed 5GT/s"* ]]; }
-verify_links() { local cmps cmp up speed width endpoint upstream total=0 okc=0; mapfile -t cmps < <(find_cmps); (( ${#cmps[@]} > 0 )) || { log "no CMP 90HX 10de:220d devices found"; return 2; }; for cmp in "${cmps[@]}"; do total=$((total+1)); up="$(upstream_of "$cmp")"; speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"; width="$(cat "/sys/bus/pci/devices/${cmp}/current_link_width" 2>/dev/null || true)"; endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"; upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"; log "$cmp upstream=$up speed=$speed width=$width"; log "  endpoint $endpoint"; log "  upstream $upstream"; card_is_gen2 "$cmp" && okc=$((okc+1)); done; log "GEN2 $okc/$total"; [[ "$okc" == "$total" ]]; }
-[[ "${1:-}" == "--verify-only" ]] && { verify_links; exit $?; }
-verify_links && { log "already Gen2"; exit 0; }
-[[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
-[[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
-log "handoff"
-bash "$PREFIX/cmp90hx-gen2-handoff.sh"
-log "Gen2 runtime"
-bash "$PREFIX/cmp90hx-gen2-minimal.sh"
-sleep 3
-verify_links
-EOF_APPLY
-    chmod +x "$APPLY_SCRIPT"
-}
-
-write_boot_gate() {
-    mkdir -p "$PREFIX" "$STATE_DIR"
-    cat > "$BOOT_GATE" <<'EOF_BOOT_GATE'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-PREFIX="/opt/cmp90hx-gen2"
-STATE_DIR="/var/lib/cmp90hx-pwner"
-APPLY_SCRIPT="$PREFIX/rejoin17-apply-all.sh"
-LOG="/var/log/cmp90hx-pwner-boot.log"
-MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-420}"
-INTERVAL="${CMP90HX_BOOT_INTERVAL:-20}"
-mkdir -p "$STATE_DIR"
-chmod 0777 "$STATE_DIR" 2>/dev/null || true
-exec >>"$LOG" 2>&1
-log(){ printf '[%s] %s\n' "$(date -Is)" "$*"; }
-boot_id(){ cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown; }
-write_status(){
-    local status="$1" elapsed="$2"
-    {
-        printf 'boot_id=%s\n' "$(boot_id)"
-        printf 'status=%s\n' "$status"
-        printf 'elapsed=%s\n' "$elapsed"
-        printf 'time=%s\n' "$(date -Is)"
-        printf 'log=%s\n' "$LOG"
-    } > "$STATE_DIR/boot-status"
-    chmod 0666 "$STATE_DIR/boot-status" 2>/dev/null || true
-}
-verify_gen2(){ bash "$APPLY_SCRIPT" --verify-only; }
-verify_compute(){
-    if [[ -x "$PREFIX/cmpunlocker-rs" ]]; then
-        "$PREFIX/cmpunlocker-rs" compute90hx-v67 verify --all-cmp90hx --expect full
-        return $?
-    fi
-    if [[ -x "$PREFIX/check.sh" ]]; then
-        ( cd "$PREFIX" && bash ./check.sh )
-        return $?
-    fi
-    log "no rejoin compute verifier found"
-    return 20
-}
-verify_all(){
-    verify_compute && verify_gen2
-}
-apply(){ bash "$APPLY_SCRIPT"; }
-start=$(date +%s)
-attempt=1
-log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s interval=${INTERVAL}s"
-while true; do
-    now=$(date +%s)
-    elapsed=$((now - start))
-    if verify_all; then
-        log "compute + Gen2 verified after ${elapsed}s"
-        write_status OK "$elapsed"
-        exit 0
-    fi
-    log "apply attempt ${attempt}, elapsed ${elapsed}s"
-    apply || true
-    sleep 5
-    now=$(date +%s)
-    elapsed=$((now - start))
-    if verify_all; then
-        log "compute + Gen2 verified after apply, elapsed ${elapsed}s"
-        write_status OK "$elapsed"
-        exit 0
-    fi
-    if (( elapsed >= MAX_WAIT )); then
-        log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
-        write_status FAIL "$elapsed"
-        exit 1
-    fi
-    sleep "$INTERVAL"
-    attempt=$((attempt + 1))
-done
-EOF_BOOT_GATE
-    chmod +x "$BOOT_GATE"
-}
-
-write_systemd_service() {
-    cat > "/etc/systemd/system/$SERVICE_NAME" <<EOF_SERVICE
-[Unit]
-Description=CMP90HX Pwner Gen2 boot apply
-Wants=systemd-udev-settle.service
-After=systemd-udev-settle.service local-fs.target systemd-modules-load.service
-Before=nvidia-persistenced.service ollama.service llama.service open-webui.service librechat.service comfyui.service
-
-[Service]
-Type=oneshot
-ExecStart=$BOOT_GATE
-RemainAfterExit=yes
-TimeoutStartSec=900
-StandardOutput=journal+console
-StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target
-EOF_SERVICE
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-}
-
-write_ssh_login_gate() {
-    mkdir -p "$STATE_DIR"
-    chmod 0777 "$STATE_DIR" 2>/dev/null || true
-    cat > "$SSH_PROFILE" <<'EOF_PROFILE'
-# CMP90HX Pwner first SSH login notice. Generated by rejoin17.sh.
-# This hook never blocks sshd and never closes the user session.
-case "$-" in *i*) ;; *) return 0 2>/dev/null || true ;; esac
-[ -t 0 ] && [ -t 1 ] || return 0 2>/dev/null || true
-[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 0 2>/dev/null || true
-
-STATE_DIR="/var/lib/cmp90hx-pwner"
-SERVICE_NAME="cmp90hx-gen2.service"
-BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
-SHOWN="/tmp/cmp90hx-pwner-ssh-shown-${USER:-user}-${BOOT_ID}"
-LOCK="/tmp/cmp90hx-pwner-ssh-lock-${BOOT_ID}"
-STATUS="$STATE_DIR/boot-status"
-
-[ -f "$SHOWN" ] && return 0 2>/dev/null || true
-mkdir "$LOCK" 2>/dev/null || return 0 2>/dev/null || true
-cleanup_lock(){ rmdir "$LOCK" 2>/dev/null || true; }
-trap cleanup_lock EXIT
-
-read_status_field(){ awk -F= -v k="$1" '$1==k {print $2}' "$STATUS" 2>/dev/null | tail -1; }
-
-wait_boot_gate(){
-    local max=480 elapsed=0 status_boot status svc
-    printf '\n\033[36;1mCMP90HX Pwner\033[0m\n'
-    while (( elapsed <= max )); do
-        status_boot=""
-        status=""
-        if [ -r "$STATUS" ]; then
-            status_boot="$(read_status_field boot_id)"
-            status="$(read_status_field status)"
-            if [ "$status_boot" = "$BOOT_ID" ]; then
-                if [ "$status" = "OK" ]; then
-                    printf '\r\033[K\033[32;1m[ OK ]\033[0m boot verify passed after %ss\n' "$elapsed"
-                    return 0
-                fi
-                if [ "$status" = "FAIL" ]; then
-                    printf '\r\033[K\033[31;1m[ FAIL ]\033[0m boot verify failed\n'
-                    return 1
-                fi
-            fi
-        fi
-
-        svc="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
-        if [ "$svc" = "failed" ]; then
-            printf '\r\033[K\033[31;1m[ FAIL ]\033[0m %s failed\n' "$SERVICE_NAME"
-            return 1
-        fi
-
-        printf '\r\033[K\033[33;1m[ WAIT ]\033[0m applying compute unlock + Gen2: %03ds / %03ds' "$elapsed" "$max"
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    printf '\n\033[31;1m[ FAIL ]\033[0m timeout while waiting for boot verify\n'
-    return 1
-}
-
-show_ok(){
-    printf '\n\033[38;5;208m        /\_/\\\n'
-    printf '       ( o.o )\n'
-    printf '        > ^ <\033[0m\n\n'
-    printf '\033[32;1mCMP90HX PWNED\033[0m  '
-    printf '\033[36;1mENJOY!\033[0m  '
-    printf '\033[38;5;208m\033[1mHA HA FULL SPEED\033[0m\n\n'
-}
-
-show_fail(){
-    printf '\n\033[31;1mCMP90HX FAIL\033[0m\n'
-    printf 'SSH is not blocked. Shell is available for repair.\n'
-    printf 'Diagnostics:\n'
-    printf '  systemctl status %s --no-pager\n' "$SERVICE_NAME"
-    printf '  journalctl -b -u %s --no-pager\n\n' "$SERVICE_NAME"
-}
-
-if wait_boot_gate; then
-    show_ok
-else
-    show_fail
-fi
-
-date -Is > "$SHOWN" 2>/dev/null || true
-return 0 2>/dev/null || true
-EOF_PROFILE
-    chmod 0644 "$SSH_PROFILE"
-}
-
-write_runtime_all() {
-    write_apply_script
-    write_boot_gate
-    write_systemd_service
-    write_ssh_login_gate
-}
 
 apply_now() {
     [[ -x "$APPLY_SCRIPT" ]] || return 10
@@ -912,69 +694,6 @@ verify_rejoin_compute_full() {
     return 20
 }
 
-verify_full() {
-    verify_compute_unlock
-    verify_rejoin_compute_full
-    verify_links
-}
-
-prompt_reboot_now() {
-    ui '\n%s\n' 'Install finished. Reboot is required to test boot gate.'
-    ui '%b[ OK ]%b Reboot now? [y/N]: ' "$GREEN$BOLD" "$RST"
-    local answer=''
-    if [[ -t 0 ]]; then read -r answer; fi
-    case "$answer" in
-        y|Y|yes|YES) sync; systemctl reboot; sleep 60 ;;
-        *) warn 'reboot skipped; run sudo reboot manually before production validation' ;;
-    esac
-}
-
-clean_install_unlock() {
-    STEP_NO=0
-    TOTAL_STEPS=12
-    clear_left
-    banner
-    run_step 'backup' backup_state
-    run_step 'stop GPU users' stop_gpu_users
-    run_step 'remove previous pwner install' purge_old_pwner
-    run_step 'remove previous NVIDIA driver' nvidia_uninstall_best_effort
-    run_step 'install dependencies' apt_install_base
-    run_step 'block nouveau' blacklist_nouveau
-    run_step 'install stock NVIDIA driver' install_stock_driver
-    run_step 'install patched driver' install_patched_driver
-    run_step 'preserve rejoin verifier' preserve_rejoin_verifiers
-    run_step 'write boot service and login notice' write_runtime_all
-    run_step 'apply Gen2 now' apply_now
-    run_step 'verify compute and Gen2' verify_full
-    ok 'UNLOCK COMPLETE'
-    prompt_reboot_now
-}
-
-uninstall_all() {
-    STEP_NO=0
-    TOTAL_STEPS=8
-    clear_left
-    banner
-    warn 'UNINSTALL removes runtime, boot hook, login notice, patched driver and NVIDIA driver files.'
-    warn 'A reboot is required; current PCIe link can remain Gen2 until the next boot.'
-    run_step 'stop services' stop_gpu_users || true
-    run_step 'remove pwner runtime' purge_old_pwner || true
-    run_step 'remove NVIDIA driver' nvidia_uninstall_best_effort || true
-    run_step 'remove nouveau blacklist' remove_bootloader_nouveau_blacklist || true
-    run_step 'sanitize depmod' sanitize_depmod || true
-    run_step 'restore initramfs' bash -c 'depmod -a; command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true' || true
-    run_step 'reload systemd' systemctl daemon-reload || true
-    run_step 'sync' sync || true
-    ok 'UNINSTALL COMPLETE'
-    ui '\nAfter reboot the volatile Gen2 state should be gone.\n'
-    ui '%b[ OK ]%b Reboot now? [y/N]: ' "$GREEN$BOLD" "$RST"
-    local answer=''
-    if [[ -t 0 ]]; then read -r answer; fi
-    case "$answer" in
-        y|Y|yes|YES) sync; systemctl reboot; sleep 60 ;;
-        *) warn 'reboot skipped; card can stay Gen2 until reboot' ;;
-    esac
-}
 
 show_verify() {
     STEP_NO=0
@@ -1005,62 +724,6 @@ show_install_cuda() {
     [[ -t 0 ]] && read -r _ || true
 }
 
-usage() {
-    cat <<EOF_USAGE
-$PROGRAM_NAME
-$REPO_URL
-
-Usage:
-  sudo ./rejoin17.sh
-  sudo ./rejoin17.sh --unlock-this-shit
-  sudo ./rejoin17.sh --verify
-  sudo ./rejoin17.sh --install-cuda
-  sudo ./rejoin17.sh --uninstall
-  sudo ./rejoin17.sh --no-tui --verify
-
-Environment:
-  AUTO_REBOOT_IF_NOUVEAU=1
-  CMP90HX_NO_TUI=1
-  CMP90HX_BOOT_MAX_WAIT=420
-  CMP90HX_BOOT_INTERVAL=20
-EOF_USAGE
-}
-
-main() {
-    case "${1:-}" in
-        --unlock-this-shit|--unlock) clean_install_unlock ;;
-        --verify|--status) show_verify ;;
-        --install-cuda|--cuda) show_install_cuda ;;
-        --uninstall|--rollback|--remove|--cancel) uninstall_all ;;
-        --help|-h) usage ;;
-        '')
-            while true; do
-                menu
-                IFS= read -r choice
-                case "$choice" in
-                    1) clean_install_unlock ;;
-                    2) show_verify ;;
-                    3) show_install_cuda ;;
-                    4)
-                        ui 'Type UNINSTALL to remove everything: '
-                        IFS= read -r confirm
-                        [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'
-                        ;;
-                    0) exit 0 ;;
-                    *) warn 'unknown option'; sleep 1 ;;
-                esac
-            done
-            ;;
-        *) usage; exit 2 ;;
-    esac
-}
-
-# -----------------------------------------------------------------------------
-# Split compute / manual Gen2 flow.
-# IMPORTANT: launch_tui(), logging, driver cleanup/install code and compute
-# verification above are the known-good monolithic implementation and are not
-# replaced here. Only high-level dispatch is overridden below.
-# -----------------------------------------------------------------------------
 
 HELPER_BIN_DIR="${HELPER_BIN_DIR:-/usr/local/bin}"
 BOOT_BEEP_SERVICE="${BOOT_BEEP_SERVICE:-boot-beep.service}"
@@ -1080,11 +743,16 @@ menu() {
 
 remove_obsolete_boot_hook() {
     systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+    systemctl disable --now rejoin17-cmp90hx.service 2>/dev/null || true
     rm -f \
         "/etc/systemd/system/$SERVICE_NAME" \
         "/lib/systemd/system/$SERVICE_NAME" \
         "/usr/lib/systemd/system/$SERVICE_NAME" \
         "/etc/systemd/system/multi-user.target.wants/$SERVICE_NAME" \
+        /etc/systemd/system/rejoin17-cmp90hx.service \
+        /lib/systemd/system/rejoin17-cmp90hx.service \
+        /usr/lib/systemd/system/rejoin17-cmp90hx.service \
+        /etc/systemd/system/multi-user.target.wants/rejoin17-cmp90hx.service \
         "$BOOT_GATE" \
         "$SSH_PROFILE" \
         /etc/profile.d/cmp90hx-pwner-firstboot.sh \
@@ -1093,9 +761,467 @@ remove_obsolete_boot_hook() {
     systemctl daemon-reload 2>/dev/null || true
 }
 
+write_compute_runtime() {
+    mkdir -p "$PREFIX"
+    cat > "$PREFIX/cmp90hx-gen2-handoff.sh" <<'EOF_COMPUTE_HANDOFF'
+#!/usr/bin/env bash
+# Make the PATCHED nvidia module the active one, safely.
+#
+# The patched module must not be the *first* nvidia driver load of a power
+# cycle. Its V67 chain replaces the signature memdesc that a plain *stock* GSP
+# boot leaves behind, so loading it first fails:
+#
+#   NVRM: GPU0 nvCheckFailedNoLog: Check failed:
+#         s_cmp90PcStockSignatureMemdescByGpu[cmp90GpuSlot] == NULL @ kernel_gsp.c:5986
+#   NVRM: GPU 0000:03:00.0: RmInitAdapter failed! (0x62:0x40:2119)
+#
+# and the half-booted GSP leaves WPR2 up, after which every retry in that same
+# boot also fails ("_kgspBootGspRm: unexpected WPR2 already up ... the GPU is
+# likely in a bad state and may need to be reset"). Only a reboot clears it,
+# so a bad first load costs a reboot and the unlock never happens.
+#
+# Fix: bring the card up with the stock module first, then hand it over to the
+# patched module. Pair with /etc/modprobe.d/cmp90hx-gen2-noauto.conf so udev
+# does not auto-load the patched module before this runs.
+set -uo pipefail
+
+KREL="$(uname -r)"
+PATCHED_DIR="/usr/lib/modules/${KREL}/updates/cmpunlocker-90hx-stockflow"
+PATCHED_SRCV="$(modinfo -F srcversion "${PATCHED_DIR}/nvidia.ko" 2>/dev/null || true)"
+UNLOAD=(nvidia_drm nvidia_modeset nvidia_uvm nvidia_peermem nvidia)
+
+log() { echo "cmp90hx-handoff: $*"; }
+loaded_srcv() { cat /sys/module/nvidia/srcversion 2>/dev/null || true; }
+gpu_ok() { nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; }
+
+wait_gpu() {  # <tries> (2 s each)
+    local i
+    for i in $(seq 1 "${1:-30}"); do gpu_ok && return 0; sleep 2; done
+    return 1
+}
+
+unload_all() {
+    modprobe -r "${UNLOAD[@]}" 2>/dev/null || { sleep 2; modprobe -r "${UNLOAD[@]}" 2>/dev/null; }
+}
+
+find_stock() {  # echo path of an unpatched nvidia.ko, if any
+    local p
+    for p in "/usr/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
+             "/lib/modules/${KREL}/updates/dkms/nvidia.ko"; do
+        [[ -f "$p" ]] && { echo "$p"; return 0; }
+    done
+    p="$(find "/lib/modules/${KREL}" -name nvidia.ko 2>/dev/null | grep -v -- "$PATCHED_DIR" | head -1)"
+    [[ -n "$p" ]] && echo "$p"
+}
+
+[[ -n "$PATCHED_SRCV" ]] || { log "FATAL: patched nvidia.ko missing at $PATCHED_DIR"; exit 1; }
+[[ -c /dev/nvidiactl || -d /sys/module/nvidia ]] || true
+
+# Fast path: patched module already active with a live GPU.
+if [[ "$(loaded_srcv)" == "$PATCHED_SRCV" ]] && gpu_ok; then
+    log "patched module already active (srcversion $PATCHED_SRCV)"
+    exit 0
+fi
+
+STOCK="$(find_stock)"
+if [[ -n "$STOCK" ]]; then
+    log "priming GPU with stock module: $STOCK"
+    unload_all
+    modprobe ecc 2>/dev/null || true
+    insmod "$STOCK" 2>/dev/null || log "WARNING: insmod stock module failed"
+    if wait_gpu 20; then
+        log "stock module brought the GPU up"
+    else
+        log "WARNING: stock module did not bring the GPU up"
+    fi
+else
+    log "WARNING: no stock nvidia.ko found; patched module may fail as first load"
+fi
+
+log "handing over to the patched module"
+unload_all
+sleep 2
+modprobe nvidia || { log "FATAL: modprobe nvidia failed"; exit 1; }
+loaded="$(loaded_srcv)"
+if [[ "$loaded" != "$PATCHED_SRCV" ]]; then
+    log "WARNING: loaded srcversion '${loaded:-none}' != patched '$PATCHED_SRCV'"
+fi
+if wait_gpu 30; then
+    modprobe nvidia_uvm 2>/dev/null || true
+    log "patched module active (srcversion ${loaded:-?})"
+    exit 0
+fi
+log "FATAL: GPU did not come up on the patched module"
+exit 1
+EOF_COMPUTE_HANDOFF
+    chmod 0755 "$PREFIX/cmp90hx-gen2-handoff.sh"
+    cat > "/etc/systemd/system/$COMPUTE_SERVICE" <<EOF_COMPUTE_UNIT
+[Unit]
+Description=CMP90HX compute driver initialization
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service local-fs.target systemd-modules-load.service
+Before=nvidia-persistenced.service ollama.service llama.service open-webui.service librechat.service comfyui.service
+ConditionPathExists=$PREFIX/cmp90hx-gen2-handoff.sh
+
+[Service]
+Type=oneshot
+# A previous interrupted manual write must not be replayed during compute init.
+ExecStartPre=/usr/bin/rm -f /var/lib/cmpunlocker-rs/rejoin16-next-write.bin
+ExecStart=/bin/bash $PREFIX/cmp90hx-gen2-handoff.sh
+RemainAfterExit=yes
+TimeoutStartSec=2000
+
+[Install]
+WantedBy=multi-user.target
+EOF_COMPUTE_UNIT
+    systemctl daemon-reload
+    systemctl enable "$COMPUTE_SERVICE"
+}
+
+write_gen2_runtime() {
+    mkdir -p "$PREFIX"
+    cat > "$PREFIX/cmp90hx-gen2-minimal.sh" <<'EOF_GEN2_MINIMAL'
+#!/usr/bin/env bash
+# CMP 90HX PCIe Gen2 unlock - adaptive 2-mask apply.
+# Register addresses and base order are intentionally unchanged:
+#   outer wrapper: handoff -> this script -> verify
+#   0x00823800 FEAT_OVR_ECC_PLM
+#   0x00088fe8 XVE privilege mask
+set -uo pipefail
+
+PREFIX="${CMP90_PREFIX:-/opt/cmp90hx-gen2}"
+CYCLE="${CMP90_CYCLE:-$PREFIX/rejoin16-cycle.sh}"
+READER="${CMP90_READER:-$PREFIX/maskread.py}"
+HANDOFF="${CMP90_HANDOFF:-$PREFIX/cmp90hx-gen2-handoff.sh}"
+MASK_FEAT_ECC=0x00823800
+MASK_XVE=0x00088fe8
+MASK_OPEN_TRIES="${CMP90HX_MASK_OPEN_TRIES:-13}"
+OPEN_REHANDOFF="${CMP90HX_OPEN_REHANDOFF:-1}"
+PCI_RESET="${CMP90HX_PCI_RESET:-0}"
+RESET_ON_STUCK="${CMP90HX_RESET_ON_STUCK:-1}"
+STUCK_REPEAT_LIMIT="${CMP90HX_STUCK_REPEAT_LIMIT:-8}"
+RESET_DONE_DIR="${CMP90HX_RESET_DONE_DIR:-/run/cmp90hx-gen2-reset-done}"
+
+log() { echo "cmp90hx-gen2: $*"; }
+
+mask_val() {  # <bdf> <addr> -> value
+    python3 "$READER" "$1" "$2" 2>/dev/null | awk '{print $1}'
+}
+
+upstream_of() { # <bdf>
+    basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"
+}
+
+retrain_gen2() {   # <bdf>
+    local bdf="$1" up lc nc
+    up="$(upstream_of "$bdf")"
+    log "  $bdf retrain target Gen2"
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 2
+}
+
+retrain_gen1_then_gen2() { # <bdf>
+    local bdf="$1" up lc nc
+    up="$(upstream_of "$bdf")"
+    log "  $bdf speed-pulse Gen1 -> Gen2"
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0001 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0001 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 2
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 3
+}
+
+nvidia_wake() { # <bdf>
+    local bdf="$1"
+    log "  $bdf nvidia-smi settle"
+    nvidia-smi --query-gpu=pci.bus_id,pcie.link.gen.current --format=csv,noheader,nounits >/dev/null 2>&1 || true
+    sleep 2
+}
+
+soft_rehandoff() { # <bdf>
+    local bdf="$1"
+    [[ "$OPEN_REHANDOFF" == "1" ]] || return 0
+    [[ -x "$HANDOFF" ]] || return 0
+    log "  $bdf full handoff refresh"
+    bash "$HANDOFF" || true
+    sleep 4
+}
+
+pci_function_reset_once() { # <bdf> <addr>
+    local bdf="$1" addr="$2" dev="/sys/bus/pci/devices/$1" key
+    [[ "$PCI_RESET" == "1" && "$RESET_ON_STUCK" == "1" ]] || return 0
+    [[ -w "$dev/reset" ]] || { log "  $bdf PCI reset unavailable"; return 0; }
+    mkdir -p "$RESET_DONE_DIR" 2>/dev/null || true
+    key="${bdf//[:.]/_}_${addr}"
+    [[ ! -e "$RESET_DONE_DIR/$key" ]] || { log "  $bdf PCI reset already used for $addr in this run"; return 0; }
+    : > "$RESET_DONE_DIR/$key" 2>/dev/null || true
+    log "  $bdf PCI function reset for stuck $addr"
+    echo 1 > "$dev/reset" 2>/dev/null || true
+    sleep 8
+    retrain_gen2 "$bdf"
+    soft_rehandoff "$bdf"
+}
+
+settle_for_try() { # <try>
+    local t="$1"
+    case $(( (t - 1) % 10 )) in
+        0) printf '0' ;;
+        1) printf '0.25' ;;
+        2) printf '0.5' ;;
+        3) printf '1' ;;
+        4) printf '2' ;;
+        5) printf '3' ;;
+        6) printf '5' ;;
+        7) printf '8' ;;
+        8) printf '13' ;;
+        *) printf '1' ;;
+    esac
+}
+
+try_prepare() { # <bdf> <try>
+    local bdf="$1" try="$2"
+    case $(( try % 18 )) in
+        3|11)
+            log "  $bdf try $try: pre-retrain"
+            retrain_gen2 "$bdf"
+            ;;
+        5|13)
+            log "  $bdf try $try: speed-pulse"
+            retrain_gen1_then_gen2 "$bdf"
+            ;;
+        7)
+            log "  $bdf try $try: nvidia settle"
+            nvidia_wake "$bdf"
+            ;;
+        9)
+            log "  $bdf try $try: longer quiet settle"
+            sleep 10
+            ;;
+        15)
+            log "  $bdf try $try: handoff refresh"
+            soft_rehandoff "$bdf"
+            ;;
+        0)
+            log "  $bdf try $try: reset stage if enabled"
+            ;;
+    esac
+}
+
+open_mask() { # <bdf> <addr>
+    local bdf="$1" addr="$2" try cur delay old_cur repeat_count=0
+
+    cur="$(mask_val "$bdf" "$addr")"
+    [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr already OK"; return 0; }
+    old_cur="$cur"
+
+    for try in $(seq 1 "$MASK_OPEN_TRIES"); do
+        try_prepare "$bdf" "$try"
+
+        CMP90_BDF="$bdf" bash "$CYCLE" "$addr" 0xffffffff >/dev/null 2>&1 || true
+
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try immediate)"; return 0; }
+
+        sleep 0.25
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try delayed-250ms)"; return 0; }
+
+        sleep 1
+        cur="$(mask_val "$bdf" "$addr")"
+        [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try delayed-1s)"; return 0; }
+
+        if [[ "$cur" == "$old_cur" ]]; then
+            repeat_count=$((repeat_count + 1))
+        else
+            repeat_count=0
+            old_cur="$cur"
+        fi
+
+        if (( repeat_count == STUCK_REPEAT_LIMIT )); then
+            log "  $bdf open $addr readback stuck at ${cur:-none}; handoff refresh"
+            soft_rehandoff "$bdf"
+        fi
+
+        if (( repeat_count == STUCK_REPEAT_LIMIT + 4 )); then
+            log "  $bdf open $addr still stuck at ${cur:-none}; reset stage"
+            pci_function_reset_once "$bdf" "$addr"
+            repeat_count=0
+        fi
+
+        delay="$(settle_for_try "$try")"
+        log "  $bdf open $addr try $try readback=${cur:-none}; sleep ${delay}s"
+        sleep "$delay"
+    done
+
+    cur="$(mask_val "$bdf" "$addr")"
+    log "  $bdf open $addr FAIL (readback=${cur:-none})"
+    return 1
+}
+
+mapfile -t BDFS < <(lspci -Dnn | awk '/10de:220d/ {print $1}')
+if [[ "${#BDFS[@]}" -eq 0 ]]; then
+    log "no CMP 90HX found; nothing to do"
+    exit 0
+fi
+
+log "mode: tries=$MASK_OPEN_TRIES pci_reset=$PCI_RESET rehandoff=$OPEN_REHANDOFF stuck_repeat_limit=$STUCK_REPEAT_LIMIT"
+
+for bdf in "${BDFS[@]}"; do
+    m_feat="$(mask_val "$bdf" "$MASK_FEAT_ECC")"
+    m_xve="$(mask_val "$bdf" "$MASK_XVE")"
+    log "$bdf masks feat_ecc=$m_feat xve=$m_xve"
+
+    if [[ "$m_feat" == "0xffffffff" && "$m_xve" == "0xffffffff" ]]; then
+        log "  masks already open - no reload cycles needed"
+    else
+        [[ "$m_feat" == "0xffffffff" ]] || open_mask "$bdf" "$MASK_FEAT_ECC" || true
+        [[ "$m_xve"  == "0xffffffff" ]] || open_mask "$bdf" "$MASK_XVE"      || true
+    fi
+
+    retrain_gen2 "$bdf"
+    spd="$(cat "/sys/bus/pci/devices/${bdf}/current_link_speed" 2>/dev/null)"
+    gen="$(nvidia-smi --query-gpu=pcie.link.gen.current,pci.bus_id --format=csv,noheader,nounits 2>/dev/null \
+           | awk -v b="${bdf#0000:}" '$2 ~ b {print $1; exit}')"
+    log "  $bdf link=${spd:-?} gen=${gen:-?}"
+done
+log "done"
+exit 0
+EOF_GEN2_MINIMAL
+    cat > "$PREFIX/rejoin16-cycle.sh" <<'EOF_GEN2_CYCLE'
+#!/usr/bin/env bash
+# Drive one rejoin16 crafted-Booter write per module reload.
+#
+# The GA102 V67 chain fires only once per FLR-separated module load, so each
+# mask register needs its own unload/reload cycle. The patched module reads
+# /var/lib/cmpunlocker-rs/rejoin16-next-write.bin (8 bytes LE: addr, value) in
+# the canary-success branch and fires exactly one write.
+#
+# Usage: ./rejoin16-cycle.sh <addr> <value>
+#   env CMP90_BDF  target card (default: first CMP 90HX)
+set -uo pipefail
+
+ADDR="$1"
+VALUE="$2"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BDF="${CMP90_BDF:-$(lspci -Dnn | awk '/10de:220d/ {print $1; exit}')}"
+SPEC=/var/lib/cmpunlocker-rs/rejoin16-next-write.bin
+POKE="${CMP90_POKE:-${SCRIPT_DIR}/bar0poke}"
+
+[[ -n "$BDF" ]] || { echo "FATAL: no CMP 90HX (10de:220d) found; set CMP90_BDF"; exit 2; }
+[[ -n "$ADDR" && -n "$VALUE" ]] || { echo "usage: $0 <addr> <value>"; exit 2; }
+
+mkdir -p /var/lib/cmpunlocker-rs
+python3 - "$ADDR" "$VALUE" "$SPEC" <<'PY'
+import struct, sys
+addr, val, path = int(sys.argv[1], 0), int(sys.argv[2], 0), sys.argv[3]
+with open(path, "wb") as f:
+    f.write(struct.pack("<II", addr, val))
+PY
+
+# Re-lock the compute selectors BEFORE unloading, while BAR0 is still
+# accessible. After `modprobe -r` the device drops into a low-power state
+# (BAR0 reads back 0xffffffff, every write REJECTED), so the old order
+# (unload first, re-lock after) silently left SS0/SS1 full, the V67 canary
+# saw "already present" and skipped the Booter chain entirely
+# ("(no REJOIN16 lines!)" + PCIe FAIL every cycle). Root trigger was a
+# power-management behavior change after an `apt --fix-broken` pulled in
+# libnvidia-compute-580/535 + regenerated initramfs; the kernel module
+# itself is still 610.43.03. Verified 2026-09-09 on ubuntu1: pre-unload
+# re-lock makes REJOIN16 fire on every cycle.
+relock() {  # re-lock SS0/SS1 to 0 with readback check; 0 on success
+    local try cur0 cur1 reader="${SCRIPT_DIR}/maskread.py"
+    for try in 1 2 3; do
+        "$POKE" "$BDF" wr 0x0082381c 0x0 >/dev/null 2>&1
+        "$POKE" "$BDF" wr 0x00823820 0x0 >/dev/null 2>&1
+        if [[ -f "$reader" ]]; then
+            read -r cur0 cur1 <<<"$(python3 "$reader" "$BDF" 0x0082381c 0x00823820 2>/dev/null)"
+            [[ "$cur0" == "0x00000000" && "$cur1" == "0x00000000" ]] && return 0
+        else
+            return 0  # no reader available; assume writes landed (legacy path)
+        fi
+        sleep 1
+    done
+    return 1
+}
+
+restore_full() {  # best-effort restore of full selectors (compute safety net)
+    "$POKE" "$BDF" wr 0x0082381c 0x88888888 >/dev/null 2>&1 || true
+    "$POKE" "$BDF" wr 0x00823820 0x00000008 >/dev/null 2>&1 || true
+}
+
+relock || { echo "FATAL: cannot re-lock selectors while driver loaded; aborting before unload"; restore_full; exit 1; }
+
+# Unload the whole stack (nvidia_drm/nvidia_modeset may be held by udev).
+modprobe -r nvidia_drm nvidia_modeset nvidia_uvm nvidia_peermem nvidia 2>/dev/null || {
+    sleep 2
+    modprobe -r nvidia_drm nvidia_modeset nvidia_uvm nvidia_peermem nvidia 2>/dev/null
+} || {
+    # 卸载失败(通常是有进程占着 /dev/nvidia*, 例如 ComfyUI 已初始化 CUDA)。
+    # 此时上面的 relock 已经把 SS0/SS1 重置为 0, 若不恢复就会【静默丢失算力解锁】
+    # (实测: 服务读到 masks=0xffffff8f, 掩码写不进, PCIe 停在 Gen1)。
+    echo "FATAL: cannot unload nvidia stack; restoring full selectors"
+    restore_full
+    exit 1
+}
+
+# Re-lock the compute selectors so the canary path runs on the next load.
+# (Done above, before unload — see relock(). Writes after unload are
+# REJECTED because BAR0 is inaccessible once the driver is gone.)
+
+dmesg -C 2>/dev/null || true
+
+# modprobe (not insmod) so kernel crypto deps (ecdh/ecc) and DRM resolve
+# automatically. The patched build is installed in
+# /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow with a depmod
+# override, so this loads the patched nvidia.ko.
+modprobe nvidia || { echo "FATAL: modprobe nvidia failed"; exit 1; }
+sleep 1
+nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1   # trigger RM init
+sleep 1
+modprobe nvidia_uvm 2>/dev/null || true
+
+echo "--- REJOIN16 result ---"
+dmesg | grep -E "REJOIN16: (spec|fwsec|write|refill)" || echo "(no REJOIN16 lines!)"
+echo "--- readback ---"
+"$POKE" "$BDF" wr "$ADDR" "$VALUE" 2>/dev/null | sed 's/^/  (cpu-write probe) /' || true
+EOF_GEN2_CYCLE
+    cat > "$PREFIX/maskread.py" <<'EOF_GEN2_READER'
+import os, mmap, struct, sys
+# usage: maskread.py <bdf> <addr> [addr...]
+# prints one 0x%08x value per address, space separated
+bdf = sys.argv[1]
+addrs = [int(a, 0) for a in sys.argv[2:]]
+fd = os.open(f"/sys/bus/pci/devices/{bdf}/resource0", os.O_RDONLY)
+m = mmap.mmap(fd, 16 << 20, mmap.MAP_SHARED, mmap.PROT_READ)
+print(" ".join("0x%08x" % struct.unpack_from("<I", m, a)[0] for a in addrs))
+os.close(fd)
+EOF_GEN2_READER
+    chmod 0755 "$PREFIX/cmp90hx-gen2-minimal.sh" "$PREFIX/rejoin16-cycle.sh"
+    chmod 0644 "$PREFIX/maskread.py"
+    write_apply_script
+}
+
 activate_compute_driver() {
     local handoff="$PREFIX/cmp90hx-gen2-handoff.sh"
     [[ -x "$handoff" ]] || { printf 'missing patched-driver handoff helper: %s\n' "$handoff"; return 20; }
+    rm -f /var/lib/cmpunlocker-rs/rejoin16-next-write.bin
     bash "$handoff"
 }
 
@@ -1107,8 +1233,8 @@ set -Eeuo pipefail
 PREFIX="/opt/cmp90hx-gen2"
 MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-3600}"
 INTERVAL="${CMP90HX_APPLY_INTERVAL:-30}"
-SOFT_MASK_TRIES="${CMP90HX_SOFT_MASK_OPEN_TRIES:-13}"
-AGGR_MASK_TRIES="${CMP90HX_AGGR_MASK_OPEN_TRIES:-13}"
+SOFT_MASK_TRIES=13
+AGGR_MASK_TRIES=13
 
 log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
 
@@ -1176,7 +1302,7 @@ handoff() {
     bash "$PREFIX/cmp90hx-gen2-handoff.sh"
 }
 
-run_minimal() {
+run_minimal() { # <label> <pci_reset> <tries>
     local label="$1" pci_reset="$2" tries="${3:-$SOFT_MASK_TRIES}"
     [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
     log "Gen2 runtime: ${label} pci_reset=${pci_reset} tries=${tries}"
@@ -1186,7 +1312,7 @@ run_minimal() {
     sleep 5
 }
 
-soft_pass() {
+soft_pass() { # <label>
     local label="$1"
     log "=== ${label}: handoff -> adaptive minimal -> verify ==="
     handoff
@@ -1254,7 +1380,7 @@ EOF_APPLY
 
 clean_install_unlock() {
     STEP_NO=0
-    TOTAL_STEPS=13
+    TOTAL_STEPS=14
     clear_left
     banner
     run_step 'backup' backup_state
@@ -1266,6 +1392,7 @@ clean_install_unlock() {
     run_step 'install stock NVIDIA driver' install_stock_driver
     run_step 'install patched driver' install_patched_driver
     run_step 'remove obsolete boot hook' remove_obsolete_boot_hook
+    run_step 'install compute startup' write_compute_runtime
     run_step 'activate patched compute driver' activate_compute_driver
     run_step 'preserve compute verifier' preserve_rejoin_verifiers
     run_step 'verify compute driver' verify_compute_unlock
@@ -1286,14 +1413,14 @@ show_apply_gen2() {
         [[ -t 0 ]] && read -r _ || true
         return 1
     }
-    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || {
-        fail 'missing installed Gen2 runtime; reinstall COMPUTE UNLOCK first'
+    [[ -x "$PREFIX/bar0poke" ]] || {
+        fail 'missing installed bar0poke; install COMPUTE UNLOCK first'
         ui '\nPress Enter to return: '
         [[ -t 0 ]] && read -r _ || true
         return 1
     }
     run_step 'disable Gen2 autostart' remove_obsolete_boot_hook
-    run_step 'write proven Gen2 runner' write_apply_script
+    run_step 'write archive Gen2 runtime' write_gen2_runtime
     run_step 'apply PCIe Gen2 now' apply_now
     ok 'PCIe GEN2 COMPLETE'
     ui '\nGen2 is manual. Run this item again after every reboot.\n'
@@ -1437,9 +1564,9 @@ Usage:
 PCIe Gen2 is manual and is not enabled at boot.
 Run --gen2 again after every reboot when Gen2 is wanted.
 
-Gen2 retry defaults:
-  CMP90HX_SOFT_MASK_OPEN_TRIES=13
-  CMP90HX_AGGR_MASK_OPEN_TRIES=13
+Gen2 mask-open attempts per card/register/pass:
+  soft=13, aggressive=13 (fixed)
+Convergence timing defaults:
   CMP90HX_APPLY_MAX_WAIT=3600
   CMP90HX_APPLY_INTERVAL=30
 EOF_USAGE

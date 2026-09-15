@@ -39,7 +39,9 @@
 
 Устанавливает NVIDIA 610.43.03 и существующий проверенный patched-driver path, активирует патченный драйвер и проверяет снятие вычислительных ограничений. Сам алгоритм установки драйвера из предыдущей рабочей версии не переписан.
 
-Этот пункт не применяет маски PCIe, не делает retrain и не запускает Gen2-runner.
+После перезагрузки `cmp90hx-compute.service` выполняет только существующую инициализацию драйвера: штатный → патченный. Это необходимо, поскольку установленный драйвер блокирует автоматическую загрузку NVIDIA через udev. Сервис не запускает Gen2-runner. Оставшаяся от прерванного ручного прохода команда записи удаляется перед инициализацией.
+
+Установка старого Gen2-сервиса исключена из вызываемого установщика до его запуска. Сборка, патчи, установка модулей и проверки compute сохранены.
 
 ### PCIe GEN2
 
@@ -51,12 +53,9 @@ handoff -> adaptive minimal -> verify
          -> mandatory final soft pass -> verify
 ```
 
-Для обычного и агрессивного прохода по умолчанию установлено по **13 попыток**:
+Для обычного и агрессивного прохода установлено по **13 попыток на каждую маску каждой карты за проход**. После агрессивного прохода сохраняется обязательный заключительный обычный проход. Внешние циклы, паузы и проверка результата сохранены из архива; 13 — это лимит открытия одной маски за проход, а не число всех циклов.
 
-```text
-CMP90HX_SOFT_MASK_OPEN_TRIES=13
-CMP90HX_AGGR_MASK_OPEN_TRIES=13
-```
+В `rejoin17.sh` встроены `rejoin17-apply-all.sh`, `cmp90hx-gen2-minimal.sh`, `rejoin16-cycle.sh`, `maskread.py` и штатный handoff из `cmp90hx-debug-bundle-20260916-002951`. При ручном запуске рабочие Gen2-файлы восстанавливаются из встроенных копий. Алгоритм записи регистров сохранён.
 
 Если Gen2 не сошёлся, безопаснее перезагрузить машину и снова вручную запустить `PCIe GEN2`.
 
@@ -149,9 +148,9 @@ On normal startup, `rejoin17.sh` launches `tmux` itself and splits the terminal 
 0) EXIT
 ```
 
-`COMPUTE UNLOCK` keeps the existing known-good driver installation path, activates the patched compute driver, and verifies the compute unlock. It does not apply PCIe masks or retrain the link.
+`COMPUTE UNLOCK` keeps the existing known-good driver installation path, activates the patched compute driver, and verifies the compute unlock. At boot, `cmp90hx-compute.service` runs only the existing stock → patched driver handoff; it never calls the Gen2 runner. A stale pending manual register-write request is removed before compute initialization. The upstream installer’s Gen2 service section is omitted before installation; its driver build and patches are unchanged.
 
-`PCIe GEN2` uses the proven debug-bundle sequence. The default soft and aggressive mask-open limits are both 13 attempts. It is manual only; no Gen2 boot service remains enabled.
+`PCIe GEN2` uses the proven debug-bundle sequence. The soft and aggressive mask-open limits are fixed at 13 attempts per card/register/pass. The archive’s outer retry loop and mandatory final soft pass are preserved. It is manual only; no Gen2 boot service remains enabled.
 
 Install and run:
 
