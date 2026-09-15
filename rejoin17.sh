@@ -25,13 +25,11 @@ AUTO_REBOOT_IF_NOUVEAU="${AUTO_REBOOT_IF_NOUVEAU:-0}"
 PURGE_NVIDIA_PACKAGES="${PURGE_NVIDIA_PACKAGES:-1}"
 KILL_GPU_PROCS="${KILL_GPU_PROCS:-1}"
 SERVICE_NAME="cmp90hx-gen2.service"
-BOOT_GATE="${PREFIX}/rejoin17-boot-gate.sh"
-APPLY_SCRIPT="${PREFIX}/rejoin17-apply-all.sh"
-SSH_PROFILE="/etc/profile.d/cmp90hx-pwner-login.sh"
+BOOT_BEEP_SERVICE="boot-beep.service"
 NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 NVIDIA_RUN="/var/tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 HELPER_BIN_DIR="${HELPER_BIN_DIR:-/usr/local/bin}"
-BOOT_BEEP_SERVICE="boot-beep.service"
+APPLY_SCRIPT="${PREFIX}/rejoin17-apply-all.sh"
 
 export LC_ALL=C
 
@@ -67,31 +65,41 @@ launch_tui() {
     tailer="/tmp/cmp90hx-pwner-tailer-$$.sh"
 
     {
-        printf '#!/usr/bin/env bash\n'
-        printf 'export CMP90HX_TUI_CHILD=1\n'
-        printf 'export FORCE_COLOR=1\n'
-        printf 'export LOG=%q\n' "$LOG"
-        printf 'exec bash %q' "$SELF_PATH"
+        printf '#!/usr/bin/env bash
+'
+        printf 'export CMP90HX_TUI_CHILD=1
+'
+        printf 'export FORCE_COLOR=1
+'
+        printf 'export LOG=%q
+' "$LOG"
+        printf 'trap "tmux kill-session -t %q 2>/dev/null || true" EXIT INT TERM
+' "$session"
+        printf 'bash %q' "$SELF_PATH"
         for a in "$@"; do printf ' %q' "$a"; done
-        printf '\n'
+        printf '
+'
     } > "$runner"
 
     {
-        printf '#!/usr/bin/env bash\n'
-        printf 'touch %q\n' "$LOG"
-        printf 'printf "DETAILED COMMAND LOG: %s\\n\\n" %q\n' "$LOG" "$LOG"
-        printf 'tail -n +1 -F %q\n' "$LOG"
+        printf '#!/usr/bin/env bash
+'
+        printf 'touch %q
+' "$LOG"
+        printf 'printf "DETAILED COMMAND LOG: %s\n\n" %q
+' "$LOG" "$LOG"
+        printf 'tail -n +1 -F %q
+' "$LOG"
     } > "$tailer"
 
     chmod +x "$runner" "$tailer"
-    tmux new-session -d -s "$session" -n "$PROGRAM_NAME" "bash '$runner'; rc=\$?; sleep 1; exit \"\$rc\""
+    tmux new-session -d -s "$session" -n "$PROGRAM_NAME" "bash '$runner'; rc=\$?; rm -f '$runner' '$tailer'; tmux kill-session -t '$session' 2>/dev/null || true; exit \"\$rc\""
     tmux split-window -h -l 55% -t "$session:0" "bash '$tailer'"
     tmux select-pane -t "$session:0.0"
     tmux select-layout -t "$session:0" even-horizontal >/dev/null 2>&1 || true
-    tmux attach -t "$session"
-    local rc=$?
+    tmux attach -t "$session" || true
     rm -f "$runner" "$tailer" 2>/dev/null || true
-    exit "$rc"
+    exit 0
 }
 launch_tui "$@"
 
@@ -117,7 +125,9 @@ warn() { ui '%b[WARN]%b %s\n' "${YELLOW}${BOLD}" "$RST" "$*"; }
 fail() { ui '%b[FAIL]%b %s\n' "${RED}${BOLD}" "$RST" "$*"; }
 die() { fail "$*"; ui 'LOG: %s\n' "$LOG"; exit 1; }
 clear_left() { [[ -t "$STATUS_FD" ]] && ui '\033[H\033[2J' || true; }
+note() { ui '%b[INFO]%b %s\n' "${CYAN}${BOLD}" "$RST" "$*"; cmdlog "INFO: $*"; }
 
+# Keep the ASCII art stable. Do not modify without intent.
 draw_banner() {
     ui '%b' "$ORANGE$BOLD"
     cat >&"$STATUS_FD" <<'EOF_BANNER'
@@ -138,19 +148,19 @@ EOF_BANNER
     ui '  jdowning100/cmpunlocker   rejoin16 Gen2 path, XVE/LTSSM 0x088fe8\n'
     ui '  Wh1stle05/cmp90hx         NVIDIA %s Linux installer and patch packaging\n\n' "$DRIVER_VERSION"
 }
-banner() {
-    draw_banner
-}
+banner() { draw_banner; }
 
 menu() {
     clear_left
-    banner 1
-    ui '1) UNLOCK THIS SHIT\n'
-    ui '2) VERIFY\n'
-    ui '3) INSTALL CUDA TOOLKIT\n'
-    ui '4) INSTALL 4-BEEP AT START\n'
-    ui '5) INSTALL FAN/GPU HELPERS\n'
-    ui '6) UNINSTALL\n'
+    banner
+    ui '1) INSTALL / UPDATE COMPUTE UNLOCK\n'
+    ui '2) APPLY PCIe GEN2 NOW\n'
+    ui '3) VERIFY COMPUTE UNLOCK\n'
+    ui '4) VERIFY PCIe GEN2\n'
+    ui '5) INSTALL CUDA TOOLKIT\n'
+    ui '6) INSTALL 4-BEEP AT START\n'
+    ui '7) INSTALL FAN/GPU HELPERS\n'
+    ui '8) UNINSTALL\n'
     ui '0) EXIT\n\nSelect: '
 }
 
@@ -159,7 +169,7 @@ TOTAL_STEPS=1
 spinner_chars=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
 shorten() {
-    local text="$1" max="${2:-34}"
+    local text="$1" max="${2:-42}"
     if (( ${#text} > max )); then printf '%s…' "${text:0:$((max-1))}"; else printf '%s' "$text"; fi
 }
 
@@ -167,8 +177,8 @@ run_step() {
     local label="$1" clean shown i pid rc elapsed spin
     shift
     STEP_NO=$((STEP_NO + 1))
-    clean="$(shorten "$label" 34)"
-    shown=$(printf '%02d/%02d  %-34s' "$STEP_NO" "$TOTAL_STEPS" "$clean")
+    clean="$(shorten "$label" 42)"
+    shown=$(printf '%02d/%02d  %-42s' "$STEP_NO" "$TOTAL_STEPS" "$clean")
     ui '\n%s ' "$shown"
     cmdlog "START: $label"
     ( "$@" ) >>"$LOG" 2>&1 &
@@ -177,7 +187,7 @@ run_step() {
     elapsed=0
     while kill -0 "$pid" 2>/dev/null; do
         spin="${spinner_chars[$((i % ${#spinner_chars[@]}))]}"
-        ui '\r\033[K%s %b%s%b %3ss' "$shown" "$ORANGE" "$spin" "$RST" "$elapsed"
+        ui '\r\033[K%s %b%s%b %4ss' "$shown" "$ORANGE" "$spin" "$RST" "$elapsed"
         sleep 0.25
         i=$((i + 1))
         (( i % 4 == 0 )) && elapsed=$((elapsed + 1))
@@ -196,63 +206,10 @@ run_step() {
     fi
 }
 
-apt_install_base() {
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y ca-certificates curl wget git tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
-}
-
-install_cuda_toolkit() {
-    export DEBIAN_FRONTEND=noninteractive
-
-    local os_id os_ver distro arch keyring_deb keyring_url
-    os_id=""
-    os_ver=""
-    if [[ -r /etc/os-release ]]; then
-        . /etc/os-release
-        os_id="${ID:-}"
-        os_ver="${VERSION_ID:-}"
-    fi
-
-    arch="$(dpkg --print-architecture 2>/dev/null || true)"
-    [[ "$arch" == "amd64" ]] || { printf 'unsupported architecture for NVIDIA CUDA repo: %s\n' "$arch"; return 2; }
-
-    case "${os_id}:${os_ver}" in
-        ubuntu:20.04) distro="ubuntu2004" ;;
-        ubuntu:22.04) distro="ubuntu2204" ;;
-        ubuntu:24.04) distro="ubuntu2404" ;;
-        debian:11) distro="debian11" ;;
-        debian:12) distro="debian12" ;;
-        *)
-            printf 'unsupported distro for automatic NVIDIA CUDA repo: ID=%s VERSION_ID=%s\n' "$os_id" "$os_ver"
-            printf 'supported here: Ubuntu 20.04/22.04/24.04, Debian 11/12\n'
-            return 2
-            ;;
-    esac
-
-    apt-get update
-    apt-get install -y ca-certificates curl wget gnupg lsb-release
-
-    keyring_deb="/var/tmp/cuda-keyring_1.1-1_${distro}_all.deb"
-    keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
-
-    download_with_retry "$keyring_url" "$keyring_deb"
-    dpkg -i "$keyring_deb"
-
-    apt-get update
-
-    # Toolkit only. Do not install the CUDA driver meta-package here.
-    apt-get install -y cuda-toolkit
-
-    command -v nvcc >/dev/null 2>&1 && nvcc --version || true
-}
-
 find_cmps() {
     for d in /sys/bus/pci/devices/*; do
         [[ -f "$d/vendor" && -f "$d/device" ]] || continue
-        if [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]]; then
-            basename "$d"
-        fi
+        [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"
     done | sort
 }
 
@@ -312,10 +269,11 @@ backup_state() {
 
 stop_gpu_users() {
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui 2>/dev/null || true
+    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
     if [[ "$KILL_GPU_PROCS" == "1" ]]; then
         pkill -f 'llama-server' 2>/dev/null || true
         pkill -f '/opt/llama.cpp' 2>/dev/null || true
+        pkill -f 'python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
         ls /dev/nvidia* >/dev/null 2>&1 && fuser -k /dev/nvidia* 2>/dev/null || true
     fi
     sleep 1
@@ -323,6 +281,7 @@ stop_gpu_users() {
 
 unload_nvidia_modules() {
     modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+    modprobe -r nvidia-vgpu-vfio nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
     sleep 1
 }
 
@@ -401,8 +360,7 @@ purge_old_pwner() {
     rm -f "/etc/systemd/system/$SERVICE_NAME" \
           /etc/systemd/system/cmp90hx-pwner-firstboot-ui.service \
           /etc/systemd/system/cmp90hx-pwner-ssh-gate.service 2>/dev/null || true
-    rm -f "$SSH_PROFILE" \
-          /etc/profile.d/cmp90hx-pwner-firstboot.sh \
+    rm -f /etc/profile.d/cmp90hx-pwner-firstboot.sh \
           /etc/profile.d/cmp90hx-pwner-login.sh 2>/dev/null || true
     rm -f /etc/update-motd.d/99-cmp90hx-pwner 2>/dev/null || true
     rm -rf "$PREFIX" "$RUNTIME_STATE_DIR" "$STATE_DIR" "$PROJECT_DIR" /usr/local/src/cmp90hx-rejoin17 2>/dev/null || true
@@ -417,11 +375,7 @@ purge_old_pwner() {
 remove_optional_helpers() {
     systemctl disable --now "$BOOT_BEEP_SERVICE" 2>/dev/null || true
     rm -f "/etc/systemd/system/$BOOT_BEEP_SERVICE" /usr/local/sbin/boot-beep4.py 2>/dev/null || true
-    rm -f "$HELPER_BIN_DIR/fan-100" \
-          "$HELPER_BIN_DIR/fan-60" \
-          "$HELPER_BIN_DIR/fan-auto" \
-          "$HELPER_BIN_DIR/gpu-full" \
-          "$HELPER_BIN_DIR/gpu-idle" 2>/dev/null || true
+    rm -f "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle" 2>/dev/null || true
     systemctl daemon-reload || true
 }
 
@@ -461,7 +415,6 @@ nvidia_uninstall_best_effort() {
     depmod -a || true
     command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true
 }
-
 
 download_with_retry() {
     local url="$1" out="$2" tmp attempts delay
@@ -511,21 +464,19 @@ git_clone_retry() {
     return 1
 }
 
+apt_install_base() {
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y ca-certificates curl wget git tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
+}
+
 install_stock_driver() {
     mkdir -p "$(dirname "$NVIDIA_RUN")"
-
     if [[ ! -s "$NVIDIA_RUN" ]]; then
         download_with_retry "$NVIDIA_RUN_URL" "$NVIDIA_RUN"
     fi
-
     chmod +x "$NVIDIA_RUN"
-    bash "$NVIDIA_RUN" \
-        --silent \
-        --accept-license \
-        --no-questions \
-        --no-cc-version-check \
-        --no-nouveau-check
-
+    bash "$NVIDIA_RUN" --silent --accept-license --no-questions --no-cc-version-check --no-nouveau-check
     depmod -a
 }
 
@@ -537,11 +488,9 @@ install_patched_driver() {
     depmod -a
 }
 
-
 write_adaptive_gen2_minimal() {
     mkdir -p "$PREFIX"
     local p wrote=0
-
     for p in "$PREFIX/cmp90hx-gen2-minimal.sh" "$PROJECT_DIR/scripts/cmp90hx-gen2-minimal.sh"; do
         [[ -f "$p" ]] || continue
         cp -a "$p" "${p}.bak.$(date +%Y%m%d-%H%M%S)" 2>/dev/null || true
@@ -770,34 +719,10 @@ log "done"
 exit 0
 EOF_GEN2_MINIMAL
         chmod +x "$p" 2>/dev/null || true
-        printf 'installed adaptive/rescue mask opener: %s\n' "$p"
+        printf 'installed adaptive Gen2 minimal: %s\n' "$p"
         wrote=1
     done
-
     [[ "$wrote" == "1" ]]
-}
-preserve_rejoin_verifiers() {
-    mkdir -p "$PREFIX"
-    local bin check copied=0
-
-    bin="$(find_rejoin_verifier_bin || true)"
-    if [[ -n "$bin" && -x "$bin" ]]; then
-        install -m 0755 "$bin" "$PREFIX/cmpunlocker-rs"
-        printf 'saved built-in verifier: %s -> %s\n' "$bin" "$PREFIX/cmpunlocker-rs"
-        copied=1
-    fi
-
-    check="$(find_rejoin_check_sh || true)"
-    if [[ -n "$check" && -f "$check" ]]; then
-        install -m 0755 "$check" "$PREFIX/check.sh"
-        printf 'saved check.sh: %s -> %s\n' "$check" "$PREFIX/check.sh"
-        copied=1
-    fi
-
-    if [[ "$copied" != "1" ]]; then
-        printf 'warning: no built-in rejoin verifier found during install\n'
-        printf 'verify will fail until cmpunlocker-rs or check.sh is available\n'
-    fi
 }
 
 write_apply_script() {
@@ -805,12 +730,17 @@ write_apply_script() {
     cat > "$APPLY_SCRIPT" <<'EOF_APPLY'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 PREFIX="/opt/cmp90hx-gen2"
 MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-3600}"
-INTERVAL="${CMP90HX_APPLY_INTERVAL:-30}"
-MASK_TRIES="${CMP90HX_MASK_OPEN_TRIES:-60}"
+SOFT_MASK_TRIES="${CMP90HX_SOFT_MASK_OPEN_TRIES:-13}"
+AGGR_MASK_TRIES="${CMP90HX_AGGR_MASK_OPEN_TRIES:-13}"
+HARD_FEAT_TRIES="${CMP90HX_HARD_FEAT_TRIES:-13}"
+MASK_FEAT="0x00823800"
+MASK_XVE="0x00088fe8"
 
 log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
+waitmsg() { log "WAIT: $*"; }
 
 find_cmps() {
     for d in /sys/bus/pci/devices/*; do
@@ -823,6 +753,10 @@ upstream_of() {
     basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"
 }
 
+mask_val() { # <bdf> <addr>
+    python3 "$PREFIX/maskread.py" "$1" "$2" 2>/dev/null | awk '{print $1}'
+}
+
 card_is_gen2() {
     local cmp="$1" up speed endpoint upstream
     up="$(upstream_of "$cmp")"
@@ -833,10 +767,19 @@ card_is_gen2() {
 }
 
 failed_cards() {
-    local cmps cmp out=()
-    mapfile -t cmps < <(find_cmps)
-    for cmp in "${cmps[@]}"; do
+    local cmp out=()
+    for cmp in $(find_cmps); do
         card_is_gen2 "$cmp" || out+=("$cmp")
+    done
+    printf '%s\n' "${out[@]}"
+}
+
+failed_feat_cards() {
+    local cmp feat out=()
+    for cmp in $(find_cmps); do
+        card_is_gen2 "$cmp" && continue
+        feat="$(mask_val "$cmp" "$MASK_FEAT")"
+        [[ "$feat" != "0xffffffff" ]] && out+=("$cmp")
     done
     printf '%s\n' "${out[@]}"
 }
@@ -870,39 +813,154 @@ verify_links() {
     [[ "$okc" == "$total" ]]
 }
 
-handoff() {
+need_runtime() {
     [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
+    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
+    [[ -x "$PREFIX/rejoin16-cycle.sh" ]] || { log "missing rejoin16-cycle script"; exit 13; }
+    [[ -r "$PREFIX/maskread.py" ]] || { log "missing maskread.py"; exit 14; }
+    [[ -x "$PREFIX/bar0poke" ]] || { log "missing bar0poke"; exit 15; }
+    if grep -q 'via resource0' "$PREFIX/rejoin16-cycle.sh" 2>/dev/null; then
+        log "FAIL: bad direct-writer shim detected. Reinstall compute unlock/runtime."
+        exit 16
+    fi
+}
+
+handoff() {
     log "handoff"
     bash "$PREFIX/cmp90hx-gen2-handoff.sh"
 }
 
-run_minimal() { # <label> <pci_reset>
-    local label="$1" pci_reset="$2"
-    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
-    log "Gen2 runtime: ${label} pci_reset=${pci_reset} tries=${MASK_TRIES}"
+run_minimal() { # <label> <pci_reset> <tries>
+    local label="$1" pci_reset="$2" tries="$3"
+    waitmsg "$label can take several minutes. Do not stop it, do not start GPU load."
+    log "Gen2 runtime: ${label} pci_reset=${pci_reset} tries=${tries}"
     CMP90HX_PCI_RESET="$pci_reset" \
-    CMP90HX_MASK_OPEN_TRIES="$MASK_TRIES" \
+    CMP90HX_RESET_ON_STUCK=1 \
+    CMP90HX_OPEN_REHANDOFF=1 \
+    CMP90HX_STUCK_REPEAT_LIMIT=8 \
+    CMP90HX_MASK_OPEN_TRIES="$tries" \
     bash "$PREFIX/cmp90hx-gen2-minimal.sh"
     sleep 5
 }
 
-soft_pass() { # <label>
-    local label="$1"
-    log "=== ${label}: handoff -> adaptive minimal -> verify ==="
+soft_pass() {
+    log "=== adaptive soft pass: handoff -> minimal, tries=${SOFT_MASK_TRIES} ==="
     handoff
-    run_minimal "$label" 0 || true
+    run_minimal "adaptive soft pass" 0 "$SOFT_MASK_TRIES" || true
     verify_links
 }
 
-rescue_pass() {
-    log "=== rescue: handoff -> adaptive minimal with targeted PCI reset -> verify ==="
+aggressive_pass() {
+    log "=== aggressive pass: handoff -> minimal with PCI reset, tries=${AGGR_MASK_TRIES} ==="
+    rm -rf /run/cmp90hx-gen2-reset-done 2>/dev/null || true
     handoff
-    CMP90HX_PCI_RESET=1 CMP90HX_MASK_OPEN_TRIES="$MASK_TRIES" bash "$PREFIX/cmp90hx-gen2-minimal.sh" || true
-    sleep 5
+    run_minimal "aggressive pass" 1 "$AGGR_MASK_TRIES" || true
     verify_links
+}
+
+stop_gpu_users() {
+    systemctl stop nvidia-persistenced 2>/dev/null || true
+    systemctl stop ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+    pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k /dev/nvidia* 2>/dev/null || true
+    fi
+    sleep 2
+}
+
+nvidia_loaded() {
+    lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'
+}
+
+force_unload_nvidia() {
+    local i
+    for i in 1 2 3 4 5; do
+        stop_gpu_users
+        modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        modprobe -r nvidia-vgpu-vfio nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true
+        if ! nvidia_loaded; then
+            log "nvidia stack unloaded"
+            return 0
+        fi
+        log "nvidia stack still loaded; retry $i/5"
+        lsmod | grep '^nvidia' || true
+        sleep 2
+    done
+    log "FAIL: nvidia stack still loaded"
+    return 1
+}
+
+retrain_gen2() { # <bdf>
+    local bdf="$1" up lc nc
+    up="$(upstream_of "$bdf")"
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+    sleep 3
+}
+
+hard_feat_card() { # <bdf>
+    local bdf="$1" try feat up
+    log "=== hard FEAT fallback for $bdf: forced unload -> target reset -> handoff -> visible rejoin16 cycles ==="
+    waitmsg "$bdf is a hard card. This stage repeats the exact visible FEAT method that opened the stuck card."
+
+    force_unload_nvidia || return 1
+
+    if [[ -w "/sys/bus/pci/devices/$bdf/reset" ]]; then
+        log "$bdf PCI function reset"
+        echo 1 > "/sys/bus/pci/devices/$bdf/reset" 2>/dev/null || true
+        sleep 5
+    else
+        log "$bdf has no writable PCI reset"
+    fi
+
+    log "PCI rescan"
+    echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+    sleep 5
+
+    log "$bdf masks before hard handoff: $(python3 "$PREFIX/maskread.py" "$bdf" "$MASK_FEAT" "$MASK_XVE" 2>/dev/null || true)"
+
+    dmesg -C 2>/dev/null || true
+    CMP90_BDF="$bdf" bash "$PREFIX/cmp90hx-gen2-handoff.sh" || true
+
+    for try in $(seq 1 "$HARD_FEAT_TRIES"); do
+        log "$bdf hard FEAT try $try/$HARD_FEAT_TRIES"
+        CMP90_BDF="$bdf" bash "$PREFIX/rejoin16-cycle.sh" "$MASK_FEAT" 0xffffffff || true
+        feat="$(mask_val "$bdf" "$MASK_FEAT")"
+        log "$bdf masks after hard FEAT try $try: $(python3 "$PREFIX/maskread.py" "$bdf" "$MASK_FEAT" "$MASK_XVE" 2>/dev/null || true)"
+        if [[ "$feat" == "0xffffffff" ]]; then
+            log "$bdf FEAT OPENED on hard try $try"
+            retrain_gen2 "$bdf"
+            return 0
+        fi
+        retrain_gen2 "$bdf"
+    done
+
+    log "$bdf hard FEAT fallback did not open FEAT"
+    return 1
+}
+
+hard_feat_fallback() {
+    local cards bdf rc=0
+    mapfile -t cards < <(failed_feat_cards)
+    (( ${#cards[@]} > 0 )) || { log "no cards need hard FEAT fallback"; return 0; }
+    log "hard FEAT fallback target cards: ${cards[*]}"
+    for bdf in "${cards[@]}"; do
+        hard_feat_card "$bdf" || rc=1
+    done
+    return "$rc"
 }
 
 [[ "${1:-}" == "--verify-only" ]] && { verify_links; exit $?; }
+
+need_runtime
+waitmsg "PCIe Gen2 is volatile. It must be applied again after every reboot."
+waitmsg "Expected runtime: 5-60 minutes depending on card state. Wait for final GEN2 result."
 
 if verify_links; then
     log "already Gen2"
@@ -910,263 +968,58 @@ if verify_links; then
 fi
 
 start="$(date +%s)"
-cycle=1
 
-while true; do
-    now="$(date +%s)"
-    elapsed=$((now - start))
-    log "convergence cycle ${cycle}, elapsed ${elapsed}s/${MAX_WAIT}s"
+log "convergence cycle 1, max_wait=${MAX_WAIT}s"
 
-    if soft_pass "adaptive pass ${cycle}"; then
-        log "Gen2 verified after adaptive pass ${cycle}"
-        exit 0
-    fi
+if soft_pass; then
+    log "Gen2 verified after adaptive soft pass"
+    exit 0
+fi
 
-    mapfile -t failed < <(failed_cards)
-    log "adaptive pass ${cycle} left non-Gen2 cards: ${failed[*]:-none}"
+mapfile -t failed < <(failed_cards)
+log "adaptive soft pass left non-Gen2 cards: ${failed[*]:-none}"
 
-    if rescue_pass; then
-        log "rescue pass reached Gen2; running mandatory final soft pass"
-    else
-        log "rescue pass did not leave all cards Gen2; running mandatory final soft pass anyway"
-    fi
+if aggressive_pass; then
+    log "Gen2 verified after aggressive pass"
+    exit 0
+fi
 
-    if soft_pass "final soft pass ${cycle}"; then
-        log "Gen2 verified after rescue + final soft pass ${cycle}"
-        exit 0
-    fi
+mapfile -t failed < <(failed_cards)
+log "aggressive pass left non-Gen2 cards: ${failed[*]:-none}"
 
-    now="$(date +%s)"
-    elapsed=$((now - start))
-    if (( elapsed >= MAX_WAIT )); then
-        log "FAIL: Gen2 was not verified inside ${MAX_WAIT}s"
-        exit 1
-    fi
+hard_feat_fallback || true
 
-    mapfile -t failed < <(failed_cards)
-    log "cycle ${cycle} incomplete; still not Gen2: ${failed[*]:-unknown}; retry in ${INTERVAL}s"
-    sleep "$INTERVAL"
-    cycle=$((cycle + 1))
-done
+log "post-hard pass: run aggressive minimal once more"
+aggressive_pass || true
+
+log "final soft pass after hard fallback"
+if soft_pass; then
+    log "Gen2 verified after hard FEAT fallback + final soft pass"
+    exit 0
+fi
+
+elapsed=$(( $(date +%s) - start ))
+if (( elapsed >= MAX_WAIT )); then
+    log "FAIL: Gen2 was not verified inside ${MAX_WAIT}s"
+else
+    log "FAIL: Gen2 did not converge. Reboot the server and run Apply PCIe Gen2 again."
+fi
+verify_links || true
+exit 1
 EOF_APPLY
     chmod +x "$APPLY_SCRIPT"
 }
-write_boot_gate() {
-    mkdir -p "$PREFIX" "$STATE_DIR"
-    cat > "$BOOT_GATE" <<'EOF_BOOT_GATE'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-PREFIX="/opt/cmp90hx-gen2"
-STATE_DIR="/var/lib/cmp90hx-pwner"
-APPLY_SCRIPT="$PREFIX/rejoin17-apply-all.sh"
-LOG="/var/log/cmp90hx-pwner-boot.log"
-MAX_WAIT="${CMP90HX_BOOT_MAX_WAIT:-3600}"
-mkdir -p "$STATE_DIR"
-chmod 0777 "$STATE_DIR" 2>/dev/null || true
-exec >>"$LOG" 2>&1
-log(){ printf '[%s] %s\n' "$(date -Is)" "$*"; }
-boot_id(){ cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown; }
-write_status(){
-    local status="$1" elapsed="$2" last="${3:-}"
-    last="${last//$'\n'/ }"
-    {
-        printf 'boot_id=%s\n' "$(boot_id)"
-        printf 'status=%s\n' "$status"
-        printf 'elapsed=%s\n' "$elapsed"
-        printf 'time=%s\n' "$(date -Is)"
-        printf 'log=%s\n' "$LOG"
-        printf 'last=%s\n' "$last"
-    } > "$STATE_DIR/boot-status"
-    chmod 0666 "$STATE_DIR/boot-status" 2>/dev/null || true
-}
-verify_gen2(){ bash "$APPLY_SCRIPT" --verify-only; }
-verify_compute(){
-    if [[ -x "$PREFIX/cmpunlocker-rs" ]]; then
-        "$PREFIX/cmpunlocker-rs" compute90hx-v67 verify --all-cmp90hx --expect full
-        return $?
-    fi
-    if [[ -x "$PREFIX/check.sh" ]]; then
-        ( cd "$PREFIX" && bash ./check.sh )
-        return $?
-    fi
-    log "no rejoin compute verifier found"
-    return 20
-}
-run_apply_with_status(){
-    local rc line now elapsed
-    set +e
-    CMP90HX_APPLY_MAX_WAIT="$MAX_WAIT" bash "$APPLY_SCRIPT" 2>&1 | while IFS= read -r line; do
-        now=$(date +%s)
-        elapsed=$((now - start))
-        log "$line"
-        write_status RUNNING "$elapsed" "$line"
-    done
-    rc=${PIPESTATUS[0]}
-    set -e
-    return "$rc"
-}
-start=$(date +%s)
-log "boot gate start boot_id=$(boot_id) max_wait=${MAX_WAIT}s"
-write_status RUNNING 0 "boot gate start; waiting for adaptive Gen2 sequence"
 
-# Do not run compute verification before the first register-write sequence.
-# The stable order is: handoff -> minimal/register writes -> retrain -> verify.
-if run_apply_with_status; then
-    now=$(date +%s)
-    elapsed=$((now - start))
-    if verify_gen2 && verify_compute; then
-        log "compute + Gen2 verified after ${elapsed}s"
-        write_status OK "$elapsed" "compute + Gen2 verified"
-        exit 0
-    fi
-    log "Gen2 apply finished, but final compute/link verification did not pass"
-fi
-
-now=$(date +%s)
-elapsed=$((now - start))
-log "FAIL: compute + Gen2 were not verified inside ${MAX_WAIT}s"
-write_status FAIL "$elapsed" "compute + Gen2 were not verified; see $LOG"
-exit 1
-EOF_BOOT_GATE
-    chmod +x "$BOOT_GATE"
-}
-write_systemd_service() {
-    cat > "/etc/systemd/system/$SERVICE_NAME" <<EOF_SERVICE
-[Unit]
-Description=CMP90HX Pwner Gen2 boot apply
-Wants=systemd-udev-settle.service
-After=systemd-udev-settle.service local-fs.target systemd-modules-load.service
-Before=nvidia-persistenced.service ollama.service llama.service open-webui.service librechat.service comfyui.service
-
-[Service]
-Type=oneshot
-ExecStart=$BOOT_GATE
-RemainAfterExit=yes
-TimeoutStartSec=4200
-StandardOutput=journal+console
-StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target
-EOF_SERVICE
-    systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME"
-}
-
-write_ssh_login_gate() {
-    mkdir -p "$STATE_DIR"
-    chmod 0777 "$STATE_DIR" 2>/dev/null || true
-    cat > "$SSH_PROFILE" <<'EOF_PROFILE'
-# CMP90HX Pwner first SSH login notice. Generated by rejoin17.sh.
-# This hook never blocks sshd and never closes the user session.
-case "$-" in *i*) ;; *) return 0 2>/dev/null || true ;; esac
-[ -t 0 ] && [ -t 1 ] || return 0 2>/dev/null || true
-[ -n "${SSH_CONNECTION:-}${SSH_TTY:-}" ] || return 0 2>/dev/null || true
-
-STATE_DIR="/var/lib/cmp90hx-pwner"
-SERVICE_NAME="cmp90hx-gen2.service"
-BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || echo unknown)"
-SHOWN="/tmp/cmp90hx-pwner-ssh-shown-${USER:-user}-${BOOT_ID}"
-LOCK="/tmp/cmp90hx-pwner-ssh-lock-${BOOT_ID}"
-STATUS="$STATE_DIR/boot-status"
-
-[ -f "$SHOWN" ] && return 0 2>/dev/null || true
-mkdir "$LOCK" 2>/dev/null || return 0 2>/dev/null || true
-cleanup_lock(){ rmdir "$LOCK" 2>/dev/null || true; }
-trap cleanup_lock EXIT
-
-read_status_field(){ awk -v k="$1" 'index($0,k"=")==1 {sub("^[^=]*=", ""); print}' "$STATUS" 2>/dev/null | tail -1; }
-shorten_line(){
-    local s="$1" max="${2:-110}"
-    s="${s//$'\n'/ }"
-    if [ "${#s}" -gt "$max" ]; then
-        printf '%s…' "${s:0:$((max-1))}"
-    else
-        printf '%s' "$s"
-    fi
-}
-
-wait_boot_gate(){
-    local max="${CMP90HX_LOGIN_MAX_WAIT:-3600}" elapsed=0 status_boot status svc last log_path shown
-    printf '\n\033[36;1mCMP90HX Pwner\033[0m\n'
-    while (( elapsed <= max )); do
-        status_boot=""
-        status=""
-        last=""
-        log_path=""
-        if [ -r "$STATUS" ]; then
-            status_boot="$(read_status_field boot_id)"
-            status="$(read_status_field status)"
-            last="$(read_status_field last)"
-            log_path="$(read_status_field log)"
-            if [ "$status_boot" = "$BOOT_ID" ]; then
-                if [ "$status" = "OK" ]; then
-                    printf '\r\033[K\033[32;1m[ OK ]\033[0m boot verify passed after %ss\n' "$elapsed"
-                    return 0
-                fi
-                if [ "$status" = "FAIL" ]; then
-                    printf '\r\033[K\033[31;1m[ FAIL ]\033[0m boot verify failed: %s\n' "$(shorten_line "$last" 100)"
-                    return 1
-                fi
-            fi
-        fi
-
-        svc="$(systemctl is-active "$SERVICE_NAME" 2>/dev/null || true)"
-        if [ "$svc" = "failed" ]; then
-            printf '\r\033[K\033[31;1m[ FAIL ]\033[0m %s failed\n' "$SERVICE_NAME"
-            return 1
-        fi
-
-        if [ -z "$last" ] && [ -n "$log_path" ] && [ -r "$log_path" ]; then
-            last="$(tail -n 1 "$log_path" 2>/dev/null)"
-        fi
-        [ -n "$last" ] || last="waiting for cmp90hx-gen2 log output"
-        shown="$(shorten_line "$last" 105)"
-        printf '\r\033[K\033[33;1m[ WAIT ]\033[0m Gen2 apply: %04ds / %04ds | %s' "$elapsed" "$max" "$shown"
-        sleep 1
-        elapsed=$((elapsed + 1))
-    done
-    printf '\n\033[31;1m[ FAIL ]\033[0m timeout while waiting for boot verify\n'
-    return 1
-}
-
-show_ok(){
-    printf '\n\033[38;5;208m        /\_/\\\n'
-    printf '       ( o.o )\n'
-    printf '        > ^ <\033[0m\n\n'
-    printf '\033[32;1mCMP90HX PWNED\033[0m  '
-    printf '\033[36;1mENJOY!\033[0m  '
-    printf '\033[38;5;208m\033[1mHA HA FULL SPEED\033[0m\n\n'
-}
-
-show_fail(){
-    printf '\n\033[31;1mCMP90HX FAIL\033[0m\n'
-    printf 'SSH is not blocked. Shell is available for repair.\n'
-    printf 'Diagnostics:\n'
-    printf '  systemctl status %s --no-pager\n' "$SERVICE_NAME"
-    printf '  journalctl -b -u %s --no-pager\n\n' "$SERVICE_NAME"
-}
-
-if wait_boot_gate; then
-    show_ok
-else
-    show_fail
-fi
-
-date -Is > "$SHOWN" 2>/dev/null || true
-return 0 2>/dev/null || true
-EOF_PROFILE
-    chmod 0644 "$SSH_PROFILE"
-}
-write_runtime_all() {
+write_runtime_files() {
+    write_adaptive_gen2_minimal
     write_apply_script
-    write_boot_gate
-    write_systemd_service
-    write_ssh_login_gate
+    systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
+    rm -f "/etc/systemd/system/$SERVICE_NAME" /etc/profile.d/cmp90hx-pwner-login.sh 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
 }
 
-apply_now() {
-    [[ -x "$APPLY_SCRIPT" ]] || return 10
+apply_gen2_now() {
+    [[ -x "$APPLY_SCRIPT" ]] || write_apply_script
     bash "$APPLY_SCRIPT"
 }
 
@@ -1178,40 +1031,30 @@ bind_cmps_to_nvidia() {
     sleep 1
 
     [[ -d /sys/bus/pci/drivers/nvidia ]] || { printf 'nvidia PCI driver is not registered\n'; return 31; }
-
     mapfile -t cmps < <(find_cmps)
     (( ${#cmps[@]} > 0 )) || { printf 'no CMP 90HX 10de:220d devices found\n'; return 32; }
 
     for cmp in "${cmps[@]}"; do
         total=$((total + 1))
         dev="/sys/bus/pci/devices/$cmp"
-        drv=""
-        if [[ -L "$dev/driver" ]]; then
-            drv="$(basename "$(readlink -f "$dev/driver")")"
-        fi
-
+        drv="none"
+        [[ -L "$dev/driver" ]] && drv="$(basename "$(readlink -f "$dev/driver")")"
         if [[ "$drv" != "nvidia" ]]; then
             printf '%s: binding to nvidia driver\n' "$cmp"
-            if [[ -n "$drv" && -e "$dev/driver/unbind" ]]; then
+            if [[ -n "$drv" && "$drv" != "none" && -e "$dev/driver/unbind" ]]; then
                 printf '%s' "$cmp" > "$dev/driver/unbind" 2>/dev/null || true
                 sleep 1
             fi
             printf 'nvidia' > "$dev/driver_override" 2>/dev/null || true
             printf '%s' "$cmp" > /sys/bus/pci/drivers_probe 2>/dev/null || true
-            if [[ ! -L "$dev/driver" ]]; then
-                printf '%s' "$cmp" > /sys/bus/pci/drivers/nvidia/bind 2>/dev/null || true
-            fi
+            [[ ! -L "$dev/driver" ]] && printf '%s' "$cmp" > /sys/bus/pci/drivers/nvidia/bind 2>/dev/null || true
             sleep 1
         fi
-
-        drv=""
-        if [[ -L "$dev/driver" ]]; then
-            drv="$(basename "$(readlink -f "$dev/driver")")"
-        fi
-        printf '%s driver=%s\n' "$cmp" "${drv:-none}"
+        drv="none"
+        [[ -L "$dev/driver" ]] && drv="$(basename "$(readlink -f "$dev/driver")")"
+        printf '%s driver=%s\n' "$cmp" "$drv"
         [[ "$drv" == "nvidia" ]] && ok=$((ok + 1))
     done
-
     printf 'nvidia-bound CMP cards: %s/%s\n' "$ok" "$total"
     [[ "$ok" == "$total" ]]
 }
@@ -1220,17 +1063,13 @@ verify_compute_unlock() {
     local ver src cmps cmp drv failed=0
     mapfile -t cmps < <(find_cmps)
     (( ${#cmps[@]} > 0 )) || { printf 'no CMP 90HX 10de:220d devices found\n'; return 10; }
-
     ver="$(modinfo -F version nvidia 2>/dev/null || true)"
     src="$(modinfo -F srcversion nvidia 2>/dev/null || true)"
     printf 'nvidia module version: %s\n' "${ver:-missing}"
     printf 'nvidia module srcversion: %s\n' "${src:-missing}"
-
     [[ "$ver" == "$DRIVER_VERSION" ]] || return 11
     [[ -n "$src" ]] || return 12
-
     bind_cmps_to_nvidia || return 13
-
     for cmp in "${cmps[@]}"; do
         drv="none"
         [[ -L "/sys/bus/pci/devices/$cmp/driver" ]] && drv="$(basename "$(readlink -f "/sys/bus/pci/devices/$cmp/driver")")"
@@ -1240,182 +1079,90 @@ verify_compute_unlock() {
         fi
     done
     [[ "$failed" == "0" ]] || return 14
-
-    if [[ -r /proc/driver/nvidia/version ]]; then
-        cat /proc/driver/nvidia/version
-    fi
+    [[ -r /proc/driver/nvidia/version ]] && cat /proc/driver/nvidia/version
     printf 'compute driver layer present\n'
 }
 
 find_rejoin_verifier_bin() {
     local p
-    for p in \
-        "$PREFIX/cmpunlocker-rs" \
-        "$PREFIX/bin/cmpunlocker-rs" \
-        "$PROJECT_DIR/cmpunlocker-rs" \
-        "/usr/local/bin/cmpunlocker-rs" \
-        "/usr/bin/cmpunlocker-rs"; do
-        [[ -x "$p" ]] && { printf '%s
-' "$p"; return 0; }
+    for p in "$PREFIX/cmpunlocker-rs" "$PREFIX/bin/cmpunlocker-rs" "$PROJECT_DIR/cmpunlocker-rs" "/usr/local/bin/cmpunlocker-rs" "/usr/bin/cmpunlocker-rs"; do
+        [[ -x "$p" ]] && { printf '%s\n' "$p"; return 0; }
     done
-
-    find \
-        "$PREFIX" \
-        "$PROJECT_DIR" \
-        /usr/local/src/cmp90hx-pwner \
-        /var/tmp \
-        /tmp \
-        -maxdepth 8 -type f -name cmpunlocker-rs -perm -111 2>/dev/null | head -1
+    find "$PREFIX" "$PROJECT_DIR" /usr/local/src/cmp90hx-pwner /var/tmp /tmp -maxdepth 8 -type f -name cmpunlocker-rs -perm -111 2>/dev/null | head -1
 }
 
 find_rejoin_check_sh() {
     local p
-    for p in \
-        "$PREFIX/check.sh" \
-        "$PROJECT_DIR/check.sh" \
-        "/usr/local/src/cmp90hx-pwner/cmp90hx/check.sh"; do
-        [[ -f "$p" ]] && { printf '%s
-' "$p"; return 0; }
+    for p in "$PREFIX/check.sh" "$PROJECT_DIR/check.sh" "/usr/local/src/cmp90hx-pwner/cmp90hx/check.sh"; do
+        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
     done
+    find "$PREFIX" "$PROJECT_DIR" /usr/local/src/cmp90hx-pwner /var/tmp /tmp -maxdepth 8 -type f -name check.sh -path '*cmp*' 2>/dev/null | head -1
+}
 
-    find \
-        "$PREFIX" \
-        "$PROJECT_DIR" \
-        /usr/local/src/cmp90hx-pwner \
-        /var/tmp \
-        /tmp \
-        -maxdepth 8 -type f -name check.sh -path '*cmp*' 2>/dev/null | head -1
+preserve_rejoin_verifiers() {
+    mkdir -p "$PREFIX"
+    local bin check copied=0
+    bin="$(find_rejoin_verifier_bin || true)"
+    if [[ -n "$bin" && -x "$bin" ]]; then
+        install -m 0755 "$bin" "$PREFIX/cmpunlocker-rs"
+        printf 'saved built-in verifier: %s -> %s\n' "$bin" "$PREFIX/cmpunlocker-rs"
+        copied=1
+    fi
+    check="$(find_rejoin_check_sh || true)"
+    if [[ -n "$check" && -f "$check" ]]; then
+        install -m 0755 "$check" "$PREFIX/check.sh"
+        printf 'saved check.sh: %s -> %s\n' "$check" "$PREFIX/check.sh"
+        copied=1
+    fi
+    [[ "$copied" == "1" ]] || printf 'warning: no built-in rejoin verifier found during install\n'
 }
 
 verify_rejoin_compute_full() {
     local bin check rc
-
     bind_cmps_to_nvidia || return 21
-
     bin="$(find_rejoin_verifier_bin || true)"
     if [[ -n "$bin" && -x "$bin" ]]; then
-        printf 'rejoin verifier: %s
-' "$bin"
+        printf 'rejoin verifier: %s\n' "$bin"
         "$bin" compute90hx-v67 verify --all-cmp90hx --expect full
         return $?
     fi
-
     check="$(find_rejoin_check_sh || true)"
     if [[ -n "$check" && -f "$check" ]]; then
-        printf 'rejoin check.sh: %s
-' "$check"
+        printf 'rejoin check.sh: %s\n' "$check"
         chmod +x "$check" 2>/dev/null || true
         ( cd "$(dirname "$check")" && bash "./$(basename "$check")" )
         rc=$?
         return "$rc"
     fi
-
-    printf 'no rejoin built-in verifier found
-'
-    printf 'expected one of:
-'
-    printf '  cmpunlocker-rs compute90hx-v67 verify --all-cmp90hx --expect full
-'
-    printf '  check.sh from cmp90hx/cmpunlocker tree
-'
+    printf 'no rejoin built-in verifier found\n'
     return 20
 }
 
-verify_full() {
-    verify_compute_unlock
-    verify_rejoin_compute_full
-    verify_links
-}
-
-prompt_reboot_now() {
-    ui '\n%s\n' 'Install finished. Reboot is required to test boot gate.'
-    ui '%b[ OK ]%b Reboot now? [y/N]: ' "$GREEN$BOLD" "$RST"
-    local answer=''
-    if [[ -t 0 ]]; then read -r answer; fi
-    case "$answer" in
-        y|Y|yes|YES) sync; systemctl reboot; sleep 60 ;;
-        *) warn 'reboot skipped; run sudo reboot manually before production validation' ;;
+install_cuda_toolkit() {
+    export DEBIAN_FRONTEND=noninteractive
+    local os_id os_ver distro arch keyring_deb keyring_url
+    os_id=""; os_ver=""
+    if [[ -r /etc/os-release ]]; then . /etc/os-release; os_id="${ID:-}"; os_ver="${VERSION_ID:-}"; fi
+    arch="$(dpkg --print-architecture 2>/dev/null || true)"
+    [[ "$arch" == "amd64" ]] || { printf 'unsupported architecture for NVIDIA CUDA repo: %s\n' "$arch"; return 2; }
+    case "${os_id}:${os_ver}" in
+        ubuntu:20.04) distro="ubuntu2004" ;;
+        ubuntu:22.04) distro="ubuntu2204" ;;
+        ubuntu:24.04) distro="ubuntu2404" ;;
+        debian:11) distro="debian11" ;;
+        debian:12) distro="debian12" ;;
+        *) printf 'unsupported distro for automatic NVIDIA CUDA repo: ID=%s VERSION_ID=%s\n' "$os_id" "$os_ver"; return 2 ;;
     esac
+    apt-get update
+    apt-get install -y ca-certificates curl wget gnupg lsb-release
+    keyring_deb="/var/tmp/cuda-keyring_1.1-1_${distro}_all.deb"
+    keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+    download_with_retry "$keyring_url" "$keyring_deb"
+    dpkg -i "$keyring_deb"
+    apt-get update
+    apt-get install -y cuda-toolkit
+    command -v nvcc >/dev/null 2>&1 && nvcc --version || true
 }
-
-clean_install_unlock() {
-    STEP_NO=0
-    TOTAL_STEPS=13
-    clear_left
-    banner
-    run_step 'backup' backup_state
-    run_step 'stop GPU users' stop_gpu_users
-    run_step 'remove previous pwner install' purge_old_pwner
-    run_step 'remove previous NVIDIA driver' nvidia_uninstall_best_effort
-    run_step 'install dependencies' apt_install_base
-    run_step 'block nouveau' blacklist_nouveau
-    run_step 'install stock NVIDIA driver' install_stock_driver
-    run_step 'install patched driver' install_patched_driver
-    run_step 'install adaptive/rescue Gen2 runtime' write_adaptive_gen2_minimal
-    run_step 'preserve rejoin verifier' preserve_rejoin_verifiers
-    run_step 'write boot service and login notice' write_runtime_all
-    run_step 'apply Gen2 now' apply_now
-    run_step 'verify compute and Gen2' verify_full
-    ok 'UNLOCK COMPLETE'
-    prompt_reboot_now
-}
-
-uninstall_all() {
-    STEP_NO=0
-    TOTAL_STEPS=9
-    clear_left
-    banner
-    warn 'UNINSTALL removes runtime, boot hook, login notice, patched driver and NVIDIA driver files.'
-    warn 'A reboot is required; current PCIe link can remain Gen2 until the next boot.'
-    run_step 'stop services' stop_gpu_users || true
-    run_step 'remove pwner runtime' purge_old_pwner || true
-    run_step 'remove optional helpers' remove_optional_helpers || true
-    run_step 'remove NVIDIA driver' nvidia_uninstall_best_effort || true
-    run_step 'remove nouveau blacklist' remove_bootloader_nouveau_blacklist || true
-    run_step 'sanitize depmod' sanitize_depmod || true
-    run_step 'restore initramfs' bash -c 'depmod -a; command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true' || true
-    run_step 'reload systemd' systemctl daemon-reload || true
-    run_step 'sync' sync || true
-    ok 'UNINSTALL COMPLETE'
-    ui '\nAfter reboot the volatile Gen2 state should be gone.\n'
-    ui '%b[ OK ]%b Reboot now? [y/N]: ' "$GREEN$BOLD" "$RST"
-    local answer=''
-    if [[ -t 0 ]]; then read -r answer; fi
-    case "$answer" in
-        y|Y|yes|YES) sync; systemctl reboot; sleep 60 ;;
-        *) warn 'reboot skipped; card can stay Gen2 until reboot' ;;
-    esac
-}
-
-show_verify() {
-    STEP_NO=0
-    TOTAL_STEPS=3
-    local failed=0
-    clear_left
-    banner
-    if run_step 'compute unlock' verify_compute_unlock; then :; else failed=1; fi
-    if run_step 'rejoin compute full' verify_rejoin_compute_full; then :; else failed=1; fi
-    if run_step 'Gen2 link' verify_links; then :; else failed=1; fi
-    if [[ "$failed" == "0" ]]; then
-        ok 'VERIFY COMPLETE'
-    else
-        warn 'VERIFY FAILED; details are in the right log pane. Program is still alive.'
-    fi
-    ui '\nPress Enter to return: '
-    [[ -t 0 ]] && read -r _ || true
-}
-
-show_install_cuda() {
-    STEP_NO=0
-    TOTAL_STEPS=1
-    clear_left
-    banner
-    run_step 'install CUDA toolkit' install_cuda_toolkit
-    ok 'CUDA TOOLKIT INSTALLED'
-    ui '\nPress Enter to return: '
-    [[ -t 0 ]] && read -r _ || true
-}
-
 
 install_boot_beep() {
     cat > /usr/local/sbin/boot-beep4.py <<'PY_BEEP4'
@@ -1447,7 +1194,6 @@ for dev in ("/dev/console", "/dev/tty0"):
         pass
 PY_BEEP4
     chmod +x /usr/local/sbin/boot-beep4.py
-
     cat > "/etc/systemd/system/${BOOT_BEEP_SERVICE}" <<'EOF_BEEP_UNIT'
 [Unit]
 Description=Four PC speaker beeps after successful boot
@@ -1462,7 +1208,6 @@ ExecStart=/usr/local/sbin/boot-beep4.py
 [Install]
 WantedBy=multi-user.target
 EOF_BEEP_UNIT
-
     systemctl daemon-reload
     systemctl enable "$BOOT_BEEP_SERVICE"
     systemctl start "$BOOT_BEEP_SERVICE" || true
@@ -1470,48 +1215,35 @@ EOF_BEEP_UNIT
 
 install_fan_gpu_helpers() {
     mkdir -p "$HELPER_BIN_DIR"
-
     cat > "$HELPER_BIN_DIR/fan-100" <<'EOF_FAN100'
 #!/usr/bin/env bash
 set -u
-if ! command -v nvidia-settings >/dev/null 2>&1; then
-    echo "nvidia-settings is missing"
-    exit 1
-fi
+if ! command -v nvidia-settings >/dev/null 2>&1; then echo "nvidia-settings is missing"; exit 1; fi
 export DISPLAY="${DISPLAY:-:0}"
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-settings -a "[gpu:${g}]/GPUFanControlState=1" || true
     nvidia-settings -a "[fan:${g}]/GPUTargetFanSpeed=100" || true
 done
 EOF_FAN100
-
     cat > "$HELPER_BIN_DIR/fan-60" <<'EOF_FAN60'
 #!/usr/bin/env bash
 set -u
-if ! command -v nvidia-settings >/dev/null 2>&1; then
-    echo "nvidia-settings is missing"
-    exit 1
-fi
+if ! command -v nvidia-settings >/dev/null 2>&1; then echo "nvidia-settings is missing"; exit 1; fi
 export DISPLAY="${DISPLAY:-:0}"
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-settings -a "[gpu:${g}]/GPUFanControlState=1" || true
     nvidia-settings -a "[fan:${g}]/GPUTargetFanSpeed=60" || true
 done
 EOF_FAN60
-
     cat > "$HELPER_BIN_DIR/fan-auto" <<'EOF_FANAUTO'
 #!/usr/bin/env bash
 set -u
-if ! command -v nvidia-settings >/dev/null 2>&1; then
-    echo "nvidia-settings is missing"
-    exit 1
-fi
+if ! command -v nvidia-settings >/dev/null 2>&1; then echo "nvidia-settings is missing"; exit 1; fi
 export DISPLAY="${DISPLAY:-:0}"
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-settings -a "[gpu:${g}]/GPUFanControlState=0" || true
 done
 EOF_FANAUTO
-
     cat > "$HELPER_BIN_DIR/gpu-full" <<'EOF_GPUFULL'
 #!/usr/bin/env bash
 set -u
@@ -1519,13 +1251,10 @@ command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is missing"; exit 1;
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-smi -i "$g" -pm 1 || true
     max_pl=$(nvidia-smi -i "$g" --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | awk '{print int($1)}')
-    if [[ "$max_pl" =~ ^[0-9]+$ && "$max_pl" -gt 0 ]]; then
-        nvidia-smi -i "$g" -pl "$max_pl" || true
-    fi
+    if [[ "$max_pl" =~ ^[0-9]+$ && "$max_pl" -gt 0 ]]; then nvidia-smi -i "$g" -pl "$max_pl" || true; fi
     nvidia-smi -i "$g" -rgc || true
 done
 EOF_GPUFULL
-
     cat > "$HELPER_BIN_DIR/gpu-idle" <<'EOF_GPUIDLE'
 #!/usr/bin/env bash
 set -u
@@ -1539,33 +1268,98 @@ for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-smi -i "$g" -lgc "$MIN_CLOCK,$MAX_CLOCK" || true
 done
 EOF_GPUIDLE
-
     chmod +x "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle"
-
     printf 'installed helpers:\n'
     ls -l "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle"
 }
 
-show_install_boot_beep() {
-    STEP_NO=0
-    TOTAL_STEPS=1
-    clear_left
-    banner
-    run_step 'install 4-beep at start' install_boot_beep
-    ok '4-BEEP INSTALLED'
-    ui '\nPress Enter to return: '
-    [[ -t 0 ]] && read -r _ || true
+install_compute_unlock() {
+    STEP_NO=0; TOTAL_STEPS=10
+    clear_left; banner
+    note 'Compute unlock is persistent after driver installation.'
+    note 'PCIe Gen2 is separate and must be applied manually after each boot.'
+    run_step 'backup current state' backup_state
+    run_step 'stop GPU users' stop_gpu_users
+    run_step 'remove previous pwner install' purge_old_pwner
+    run_step 'remove previous NVIDIA driver' nvidia_uninstall_best_effort
+    run_step 'install dependencies' apt_install_base
+    run_step 'block nouveau' blacklist_nouveau
+    run_step 'install stock NVIDIA driver' install_stock_driver
+    run_step 'install patched compute unlock driver' install_patched_driver
+    run_step 'install manual Gen2 runtime files' write_runtime_files
+    run_step 'verify compute unlock' verify_rejoin_compute_full
+    ok 'COMPUTE UNLOCK INSTALLED'
+    warn 'Gen2 was not applied. Reboot if needed, then run menu item 2: APPLY PCIe GEN2 NOW.'
+    ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true
 }
 
-show_install_helpers() {
-    STEP_NO=0
-    TOTAL_STEPS=1
-    clear_left
-    banner
-    run_step 'install fan/gpu helpers' install_fan_gpu_helpers
-    ok 'FAN/GPU HELPERS INSTALLED'
-    ui '\nPress Enter to return: '
-    [[ -t 0 ]] && read -r _ || true
+show_apply_gen2() {
+    STEP_NO=0; TOTAL_STEPS=1
+    clear_left; banner
+    note 'Applying PCIe Gen2 now. This is volatile and must be repeated after every reboot.'
+    note 'The sequence is exact: soft 13 -> aggressive 13 -> hard target reset fallback -> final soft.'
+    note 'Wait. Some cards can take many minutes. Do not start GPU load while it runs.'
+    write_apply_script
+    if run_step 'apply PCIe Gen2 now; wait, this can be long' apply_gen2_now; then
+        ok 'PCIe GEN2 APPLY COMPLETE'
+    else
+        warn 'Gen2 did not converge. Reboot the server and try menu item 2 again.'
+    fi
+    ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true
+}
+
+show_verify_compute() {
+    STEP_NO=0; TOTAL_STEPS=2
+    local failed=0
+    clear_left; banner
+    if run_step 'compute driver layer' verify_compute_unlock; then :; else failed=1; fi
+    if run_step 'rejoin compute full' verify_rejoin_compute_full; then :; else failed=1; fi
+    [[ "$failed" == "0" ]] && ok 'COMPUTE VERIFY COMPLETE' || warn 'COMPUTE VERIFY FAILED; see right log pane.'
+    ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true
+}
+
+show_verify_gen2() {
+    STEP_NO=0; TOTAL_STEPS=1
+    clear_left; banner
+    if run_step 'PCIe Gen2 link' verify_links; then ok 'GEN2 VERIFY COMPLETE'; else warn 'GEN2 VERIFY FAILED; run Apply PCIe Gen2 or reboot and retry.'; fi
+    ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true
+}
+
+show_verify_all() {
+    STEP_NO=0; TOTAL_STEPS=3
+    local failed=0
+    clear_left; banner
+    if run_step 'compute driver layer' verify_compute_unlock; then :; else failed=1; fi
+    if run_step 'rejoin compute full' verify_rejoin_compute_full; then :; else failed=1; fi
+    if run_step 'PCIe Gen2 link' verify_links; then :; else failed=1; fi
+    [[ "$failed" == "0" ]] && ok 'VERIFY COMPLETE' || warn 'VERIFY FAILED; see right log pane.'
+    ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true
+}
+
+show_install_cuda() { STEP_NO=0; TOTAL_STEPS=1; clear_left; banner; run_step 'install CUDA toolkit' install_cuda_toolkit; ok 'CUDA TOOLKIT INSTALLED'; ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true; }
+show_install_boot_beep() { STEP_NO=0; TOTAL_STEPS=1; clear_left; banner; run_step 'install 4-beep at start' install_boot_beep; ok '4-BEEP INSTALLED'; ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true; }
+show_install_helpers() { STEP_NO=0; TOTAL_STEPS=1; clear_left; banner; run_step 'install fan/gpu helpers' install_fan_gpu_helpers; ok 'FAN/GPU HELPERS INSTALLED'; ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true; }
+
+uninstall_all() {
+    STEP_NO=0; TOTAL_STEPS=9
+    clear_left; banner
+    warn 'UNINSTALL removes runtime, optional helpers, patched driver and NVIDIA driver files.'
+    warn 'A reboot is required; current PCIe link can remain Gen2 until the next boot.'
+    run_step 'stop services' stop_gpu_users || true
+    run_step 'remove pwner runtime' purge_old_pwner || true
+    run_step 'remove optional helpers' remove_optional_helpers || true
+    run_step 'remove NVIDIA driver' nvidia_uninstall_best_effort || true
+    run_step 'remove nouveau blacklist' remove_bootloader_nouveau_blacklist || true
+    run_step 'sanitize depmod' sanitize_depmod || true
+    run_step 'restore initramfs' bash -c 'depmod -a; command -v update-initramfs >/dev/null 2>&1 && update-initramfs -u -k all || true' || true
+    run_step 'reload systemd' systemctl daemon-reload || true
+    run_step 'sync' sync || true
+    ok 'UNINSTALL COMPLETE'
+    ui '\nAfter reboot the volatile Gen2 state should be gone.\n'
+    ui '%b[ OK ]%b Reboot now? [y/N]: ' "$GREEN$BOLD" "$RST"
+    local answer=''
+    if [[ -t 0 ]]; then read -r answer; fi
+    case "$answer" in y|Y|yes|YES) sync; systemctl reboot; sleep 60 ;; *) warn 'reboot skipped; card can stay Gen2 until reboot' ;; esac
 }
 
 usage() {
@@ -1575,48 +1369,52 @@ $REPO_URL
 
 Usage:
   sudo ./rejoin17.sh
-  sudo ./rejoin17.sh --unlock-this-shit
+  sudo ./rejoin17.sh --install-compute
+  sudo ./rejoin17.sh --apply-gen2
+  sudo ./rejoin17.sh --verify-compute
+  sudo ./rejoin17.sh --verify-gen2
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
   sudo ./rejoin17.sh --install-beep
   sudo ./rejoin17.sh --install-helpers
   sudo ./rejoin17.sh --uninstall
-  sudo ./rejoin17.sh --no-tui --verify
 
-Environment:
-  AUTO_REBOOT_IF_NOUVEAU=1
-  CMP90HX_NO_TUI=1
-  CMP90HX_BOOT_MAX_WAIT=3600
-  CMP90HX_BOOT_INTERVAL=20
-  CMP90HX_LOGIN_MAX_WAIT=3600
-  CMP90HX_APPLY_MAX_WAIT=3600
-  CMP90HX_MASK_OPEN_TRIES=60
-  CMP90HX_MASK_OPEN_SLEEP=2
-  CMP90HX_PCI_RESET=1
-  CMP90HX_OPEN_REHANDOFF=1
+Notes:
+  Compute unlock is persistent after installation.
+  PCIe Gen2 is volatile and must be applied manually after each boot.
+  This script does not create a Gen2 boot autostart service.
 EOF_USAGE
 }
 
 main() {
     case "${1:-}" in
-        --unlock-this-shit|--unlock) clean_install_unlock ;;
-        --verify|--status) show_verify ;;
+        --install-compute|--install|--compute|--rejoin) install_compute_unlock ;;
+        --apply-gen2|--gen2) show_apply_gen2 ;;
+        --verify-compute) show_verify_compute ;;
+        --verify-gen2) show_verify_gen2 ;;
+        --verify|--status) show_verify_all ;;
         --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;
         --install-helpers|--helpers|--fan-scripts|--gpu-scripts) show_install_helpers ;;
         --uninstall|--rollback|--remove|--cancel) uninstall_all ;;
+        --unlock-this-shit|--unlock)
+            warn 'Combined unlock-all mode was removed. Running compute install only. Apply Gen2 manually after reboot.'
+            install_compute_unlock
+            ;;
         --help|-h) usage ;;
         '')
             while true; do
                 menu
                 IFS= read -r choice
                 case "$choice" in
-                    1) clean_install_unlock ;;
-                    2) show_verify ;;
-                    3) show_install_cuda ;;
-                    4) show_install_boot_beep ;;
-                    5) show_install_helpers ;;
-                    6)
+                    1) install_compute_unlock ;;
+                    2) show_apply_gen2 ;;
+                    3) show_verify_compute ;;
+                    4) show_verify_gen2 ;;
+                    5) show_install_cuda ;;
+                    6) show_install_boot_beep ;;
+                    7) show_install_helpers ;;
+                    8)
                         ui 'Type UNINSTALL to remove everything: '
                         IFS= read -r confirm
                         [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'
