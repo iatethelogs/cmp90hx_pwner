@@ -20,6 +20,8 @@
 
 Главное изменение текущей версии: **Gen2 больше не запускается автоматически при загрузке системы**. После каждой перезагрузки пользователь сам запускает пункт `PCIe GEN2`. Общего пункта «compute + Gen2 сразу» больше нет.
 
+При обычном запуске `rejoin17.sh` сам открывает `tmux` и делит окно на две панели: слева интерфейс и прогресс, справа подробный живой лог команд. Отдельный launcher/core больше не используется и в начале работы скрипт не скачивает никакой вспомогательный `rejoin17-core.sh`.
+
 ## Главное меню
 
 ```text
@@ -62,7 +64,7 @@ CMP90HX_AGGR_MASK_OPEN_TRIES=13
 
 На чистой Ubuntu Secure Boot должен быть выключен. Во время установки не подключайте монитор к CMP 90HX: `nouveau` может занять карту до установки нужного драйвера.
 
-Можно скачать один launcher:
+Скачайте один скрипт:
 
 ```bash
 wget https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/rejoin17.sh
@@ -70,7 +72,7 @@ chmod +x rejoin17.sh
 sudo AUTO_REBOOT_IF_NOUVEAU=1 ./rejoin17.sh
 ```
 
-При запуске из клонированного репозитория launcher использует локальный `lib/rejoin17-core.sh`. При одиночном `wget` он загружает этот же core из текущего `main`.
+Если `tmux` ещё не установлен, скрипт установит его перед созданием двухпанельного интерфейса. Если `tmux` уже установлен, до появления интерфейса ничего дополнительно не скачивается.
 
 Сначала один раз выберите:
 
@@ -86,7 +88,7 @@ sudo AUTO_REBOOT_IF_NOUVEAU=1 ./rejoin17.sh
 
 После каждой следующей перезагрузки повторно запускайте только `PCIe GEN2`.
 
-То же самое без меню:
+То же самое без выбора пункта меню:
 
 ```bash
 sudo ./rejoin17.sh --compute-unlock
@@ -134,6 +136,8 @@ CMP 90HX utility with two separate actions: install the compute unlock and manua
 
 **Gen2 is no longer started automatically at boot.** Run `PCIe GEN2` manually after every reboot. There is no combined compute+Gen2 action.
 
+On normal startup, `rejoin17.sh` launches `tmux` itself and splits the terminal into two panes: UI/progress on the left and the live detailed command log on the right. There is no separate launcher/core download at startup.
+
 ```text
 1) COMPUTE UNLOCK
 2) PCIe GEN2
@@ -147,7 +151,7 @@ CMP 90HX utility with two separate actions: install the compute unlock and manua
 
 `COMPUTE UNLOCK` keeps the existing known-good driver installation path, activates the patched compute driver, and verifies the compute unlock. It does not apply PCIe masks or retrain the link.
 
-`PCIe GEN2` uses the proven debug-bundle sequence. The default soft and aggressive mask-open limits are both 13 attempts. It is manual only; no Gen2 boot service is enabled by this front-end.
+`PCIe GEN2` uses the proven debug-bundle sequence. The default soft and aggressive mask-open limits are both 13 attempts. It is manual only; no Gen2 boot service remains enabled.
 
 Install and run:
 
@@ -156,6 +160,8 @@ wget https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/rejoin17.s
 chmod +x rejoin17.sh
 sudo AUTO_REBOOT_IF_NOUVEAU=1 ./rejoin17.sh
 ```
+
+If `tmux` is missing, the script installs it before opening the two-pane UI. If `tmux` is already installed, there is no extra startup download.
 
 Or use CLI actions:
 
