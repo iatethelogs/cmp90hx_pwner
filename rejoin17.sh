@@ -6,18 +6,78 @@
 
 set -Eeuo pipefail
 
+PROGRAM_NAME="CMP90HX Pwner"
 WRAPPER_SELF="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
 WRAPPER_DIR="$(cd "$(dirname "$WRAPPER_SELF")" && pwd)"
 CORE="${CMP90HX_CORE_PATH:-$WRAPPER_DIR/lib/rejoin17-core.sh}"
 CORE_TMP=""
+LOG_DIR="${LOG_DIR:-/var/log}"
+LOG="${LOG:-${LOG_DIR}/cmp90hx-pwner-$(date +%Y%m%d-%H%M%S).log}"
 REQUESTED_NO_TUI=0
 [[ "${1:-}" == "--no-tui" ]] && REQUESTED_NO_TUI=1
 ORIGINAL_NO_TUI="${CMP90HX_NO_TUI-}"
+[[ "$REQUESTED_NO_TUI" == "1" ]] && export CMP90HX_NO_TUI=1
 
 cleanup_wrapper() {
     [[ -z "$CORE_TMP" ]] || rm -f "$CORE_TMP" 2>/dev/null || true
 }
 trap cleanup_wrapper EXIT
+
+if [[ "$(id -u)" != "0" ]]; then
+    exec sudo -E bash "$WRAPPER_SELF" "$@"
+fi
+
+# Launch the split terminal before sourcing the legacy core. The core redirects
+# stdout/stderr to the log at top level, so launching tmux afterwards would make
+# stdout cease to be a TTY and the original launch_tui() would correctly refuse
+# to start. Parent: left = UI, right = live detailed log. Child: no nested tmux.
+wrapper_launch_tui() {
+    [[ "${CMP90HX_TUI_CHILD:-0}" == "1" ]] && return 0
+    [[ "${CMP90HX_NO_TUI:-0}" == "1" || "${NO_TUI:-0}" == "1" ]] && return 0
+    [[ -t 0 && -t 1 ]] || return 0
+    [[ -n "${TMUX:-}" ]] && return 0
+
+    if ! command -v tmux >/dev/null 2>&1; then
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y tmux >/dev/null 2>&1 || true
+        fi
+    fi
+    command -v tmux >/dev/null 2>&1 || return 0
+
+    local session runner tailer a
+    session="cmp90hx-pwner-$$"
+    runner="/tmp/cmp90hx-pwner-runner-$$.sh"
+    tailer="/tmp/cmp90hx-pwner-tailer-$$.sh"
+
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'export CMP90HX_TUI_CHILD=1\n'
+        printf 'export FORCE_COLOR=1\n'
+        printf 'export LOG=%q\n' "$LOG"
+        printf 'exec bash %q' "$WRAPPER_SELF"
+        for a in "$@"; do printf ' %q' "$a"; done
+        printf '\n'
+    } > "$runner"
+
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'touch %q\n' "$LOG"
+        printf 'printf "DETAILED COMMAND LOG: %s\\n\\n" %q\n' "$LOG" "$LOG"
+        printf 'tail -n +1 -F %q\n' "$LOG"
+    } > "$tailer"
+
+    chmod +x "$runner" "$tailer"
+    tmux new-session -d -s "$session" -n "$PROGRAM_NAME" "bash '$runner'; rc=\$?; sleep 1; exit \"\$rc\""
+    tmux split-window -h -l 55% -t "$session:0" "bash '$tailer'"
+    tmux select-pane -t "$session:0.0"
+    tmux select-layout -t "$session:0" even-horizontal >/dev/null 2>&1 || true
+    tmux attach -t "$session"
+    local rc=$?
+    rm -f "$runner" "$tailer" 2>/dev/null || true
+    exit "$rc"
+}
+wrapper_launch_tui "$@"
 
 if [[ ! -r "$CORE" ]]; then
     CORE_TMP="${TMPDIR:-/tmp}/cmp90hx-pwner-core-$$.sh"
@@ -34,8 +94,9 @@ if [[ ! -r "$CORE" ]]; then
 fi
 
 # Source the reverted, known-good implementation without executing its old main().
-# Force TUI suppression only while loading it; this keeps all original functions
-# byte-for-byte intact and lets this front-end launch the same TUI afterwards.
+# TUI has already been created by the wrapper, so suppress only the core's own
+# launch attempt. In the tmux child the core then opens fd 3 on /dev/tty for the
+# left UI and redirects stdout/stderr into LOG for the right live log pane.
 export CMP90HX_NO_TUI=1
 # shellcheck disable=SC1090
 source <(sed '/^main "\$@"$/d' "$CORE")
@@ -44,9 +105,6 @@ if [[ "$REQUESTED_NO_TUI" == "1" || "$ORIGINAL_NO_TUI" == "1" ]]; then
 else
     unset CMP90HX_NO_TUI
 fi
-
-# Use the original TUI implementation from the known-good core.
-launch_tui "$@"
 
 menu() {
     clear_left
