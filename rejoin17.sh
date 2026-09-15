@@ -61,7 +61,7 @@ menu() {
     ui '0) EXIT\n\nSelect: '
 }
 
-remove_gen2_autostart() {
+remove_obsolete_boot_hook() {
     systemctl disable --now "$SERVICE_NAME" 2>/dev/null || true
     rm -f \
         "/etc/systemd/system/$SERVICE_NAME" \
@@ -250,7 +250,7 @@ clean_install_unlock() {
     run_step 'block nouveau' blacklist_nouveau
     run_step 'install stock NVIDIA driver' install_stock_driver
     run_step 'install patched driver' install_patched_driver
-    run_step 'disable PCIe Gen2 autostart' remove_gen2_autostart
+    run_step 'remove obsolete boot hook' remove_obsolete_boot_hook
     run_step 'activate patched compute driver' activate_compute_driver
     run_step 'preserve compute verifier' preserve_rejoin_verifiers
     run_step 'verify compute driver' verify_compute_unlock
@@ -264,7 +264,7 @@ show_apply_gen2() {
     clear_left
     banner
     [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { fail 'COMPUTE UNLOCK must be installed first'; ui '\nPress Enter to return: '; [[ -t 0 ]] && read -r _ || true; return 1; }
-    run_step 'disable Gen2 autostart' remove_gen2_autostart
+    run_step 'disable Gen2 autostart' remove_obsolete_boot_hook
     run_step 'restore proven Gen2 minimal' write_adaptive_gen2_minimal
     run_step 'write proven Gen2 runner' write_apply_script
     run_step 'apply PCIe Gen2 now' apply_now
@@ -275,7 +275,7 @@ show_apply_gen2() {
 }
 
 uninstall_split() {
-    remove_gen2_autostart || true
+    remove_obsolete_boot_hook || true
     uninstall_all
 }
 
