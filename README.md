@@ -45,20 +45,20 @@
 
 ### PCIe GEN2
 
-Запускается вручную. Полный механизм взят из `root-scripts/cmp90hx-gen2-exact-worked.sh` архива `cmp90hx-debug-bundle-20260916-002951` и встроен в единственный основной файл `rejoin17.sh` вместе с архивными зависимостями.
+Основой единого Gen2-процесса служит приложенный `cmp90hx-gen2-known-good(2).sh`.
 
-Порядок выполнения:
+1. Каждая карта последовательно проходит мягкий этап known-good. Если он не помог — агрессивный этап и обязательный заключительный мягкий этап для этой же карты.
+2. После обхода всех карт состояние проверяется заново. Только оставшиеся без Gen2 карты с закрытой FEAT получают исходное hard-FEAT восстановление: выгрузка NVIDIA → сброс выбранной карты → rescan → handoff → повторные реальные записи FEAT с проверкой и retrain.
+3. После восстановления выполняется заключительный мягкий этап для той же карты, включая обработку XVE. Открытый FEAT исключает повторный hard-FEAT сброс.
+4. Итоговая проверка охватывает весь первоначальный список карт: исчезновение устройства не считается успехом.
 
-1. Проверка состояния и полный хороший способ из `exact-worked`. Карты, уже работающие на Gen2, пропускают адресную обработку FEAT.
-2. Для выбранной карты сохраняются четыре FEAT-цикла из исходника: принудительная выгрузка NVIDIA, PCI reset карты, rescan, ожидание устройства, настоящий handoff штатного драйвера в патченный, настоящий `rejoin16-cycle.sh`, чтение маски и retrain. Подготовка заново выполняется перед каждым FEAT-циклом.
-3. После FEAT каждой карты выполняются исходные глобальный агрессивный XVE-проход и мягкий проход. Затем сохраняются финальный глобальный агрессивный проход и до трёх мягких проходов из `exact-worked`.
-4. Только если этот способ не помог всем картам — отдельный hard-FEAT механизм из предыдущей работы. Он выбирает оставшиеся без Gen2 карты с закрытой FEAT и повторно проверяет каждую непосредственно перед обработкой. После выгрузки NVIDIA, сброса выбранной карты, rescan и handoff запускаются до **13 новых записей FEAT после сброса** через настоящий `rejoin16-cycle.sh`, с проверкой и retrain. Завершают обработку агрессивный XVE и мягкий проход. Этот блок перенесён из сохранённого `rejoin17_short.sh`; его функции изолированы, исходные функции `exact-worked` сохранены.
+Для мягкого, агрессивного и hard-FEAT этапов установлено по **13 попыток на маску за проход**. Паузы, действия открытия масок и последовательность сильного восстановления сохранены из known-good и его архивной зависимости. `CMP90HX_TOTAL_TIMEOUT` по умолчанию равен 3600 секунд; время проверяется между операциями.
 
-Адресные сбросы применяются к неподдавшимся картам. Выгрузка NVIDIA, агрессивные XVE и мягкие проходы затрагивают весь набор карт — эта логика исходника сохранена.
+Операции необходимой known-good зависимости встроены в основной процесс. Отдельный `cmp90hx-gen2-minimal.sh` больше не создаётся и не вызывается; его старая установленная копия удаляется при ручном обновлении runtime. Вложенных обходов GPU нет. Предыдущий exact-процесс с четырьмя подготовительными FEAT-циклами удалён.
 
-Лимиты мягкого и агрессивного проходов фиксированы на 13. `CMP90HX_FEAT_CYCLES` по умолчанию равен 4, `CMP90HX_SOFT_ROUNDS` — 3, `CMP90HX_TOTAL_TIMEOUT` — 3600 секунд. Время проверяется между этапами, а не принудительным прерыванием команды сброса или загрузки драйвера.
+Адресные записи и сбросы относятся к текущей карте. Выгрузка общего драйвера NVIDIA влияет на весь набор GPU. Лог отмечает PCI-адрес, этап, начало и конец обработки каждой карты.
 
-При неудаче программа предлагает перезагрузить сервер и повторить `PCIe GEN2`: результат зависит от состояния карт после загрузки. Перезагрузка автоматически не запускается. Сообщение и подробный лог остаются в двух панелях tmux; Enter возвращает в меню, в том числе при запуске через `--gen2`.
+При неудаче программа предлагает перезагрузить сервер и повторить запуск: состояние карт после загрузки влияет на результат. Автоматической перезагрузки нет; обе панели tmux остаются открытыми, Enter возвращает в меню.
 
 ## Установка
 
@@ -151,11 +151,9 @@ On normal startup, `rejoin17.sh` launches `tmux` itself and splits the terminal 
 
 `COMPUTE UNLOCK` keeps the existing known-good driver installation path, activates the patched compute driver, and verifies the compute unlock. At boot, `cmp90hx-compute.service` runs only the existing stock → patched driver handoff; it never calls the Gen2 runner. A stale pending manual register-write request is removed before compute initialization. The upstream installer’s Gen2 service section is omitted before installation; its driver build and patches are unchanged.
 
-`PCIe GEN2` embeds the complete `root-scripts/cmp90hx-gen2-exact-worked.sh` mechanism. The complete exact-worked method runs first on cards below Gen2: unload NVIDIA, reset the target, rescan, stock-to-patched handoff, real register-write cycle and retrain, followed by the original global aggressive XVE and soft passes. Cards already at Gen2 skip the per-card FEAT phase. Driver unloading and global passes still affect all cards.
+`PCIe GEN2` uses the supplied `cmp90hx-gen2-known-good(2).sh` as its primary workflow. Each GPU receives a soft pass, then an aggressive pass and mandatory soft finish if needed. After all GPUs have been visited, remaining non-Gen2 cards with closed FEAT receive the original hard recovery: unload NVIDIA, reset the target, rescan, handoff and fresh real FEAT writes with readback and retrain. A final soft pass, including XVE processing, follows for that same card.
 
-If exact recovery is exhausted, the separate prior hard-FEAT mechanism selects remaining non-Gen2 cards with closed FEAT, unloads NVIDIA, resets the target, rescans and hands off, then starts up to 13 fresh real FEAT-write attempts. Aggressive XVE and a final soft pass follow. Its function overrides are isolated from the complete exact-worked implementation.
-
-Soft/aggressive limits are 13; the original four FEAT cycles and three final soft rounds are retained. Failure displays a reboot-and-retry suggestion and returns to the menu without closing the tmux panes. No reboot or Gen2 boot service is started automatically.
+Soft/aggressive/hard-FEAT limits are 13. The required adaptive dependency's operations are embedded without its GPU enumeration; the standalone minimal runner is no longer written or called, and its stale installed copy is removed. The previous four-cycle exact workflow is removed. Shared driver reloads still affect all GPUs; final verification checks the original inventory. Failure suggests rebooting and retrying, preserving both tmux panes. Gen2 remains manual only.
 
 Install and run:
 
