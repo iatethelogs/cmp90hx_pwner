@@ -879,7 +879,7 @@ EOF_COMPUTE_UNIT
 }
 
 write_gen2_runtime() {
-    mkdir -p "$PREFIX"
+    mkdir -p "$PREFIX" || return $?
     cat > "$PREFIX/cmp90hx-gen2-minimal.sh" <<'EOF_GEN2_MINIMAL'
 #!/usr/bin/env bash
 # CMP 90HX PCIe Gen2 unlock - adaptive 2-mask apply.
@@ -1213,8 +1213,8 @@ m = mmap.mmap(fd, 16 << 20, mmap.MAP_SHARED, mmap.PROT_READ)
 print(" ".join("0x%08x" % struct.unpack_from("<I", m, a)[0] for a in addrs))
 os.close(fd)
 EOF_GEN2_READER
-    chmod 0755 "$PREFIX/cmp90hx-gen2-minimal.sh" "$PREFIX/rejoin16-cycle.sh"
-    chmod 0644 "$PREFIX/maskread.py"
+    chmod 0755 "$PREFIX/cmp90hx-gen2-minimal.sh" "$PREFIX/rejoin16-cycle.sh" || return $?
+    chmod 0644 "$PREFIX/maskread.py" || return $?
     write_apply_script
 }
 
@@ -1226,156 +1226,551 @@ activate_compute_driver() {
 }
 
 write_apply_script() {
-    mkdir -p "$PREFIX"
-    cat > "$APPLY_SCRIPT" <<'EOF_APPLY'
+    mkdir -p "$PREFIX" || return $?
+    cat > "$APPLY_SCRIPT" <<'EOF_APPLY' || return $?
 #!/usr/bin/env bash
 set -Eeuo pipefail
-PREFIX="/opt/cmp90hx-gen2"
-MAX_WAIT="${CMP90HX_APPLY_MAX_WAIT:-3600}"
-INTERVAL="${CMP90HX_APPLY_INTERVAL:-30}"
-SOFT_MASK_TRIES=13
-AGGR_MASK_TRIES=13
 
-log() { printf '[cmp90hx-pwner] %s\n' "$*"; }
+PREFIX="${CMP90_PREFIX:-/opt/cmp90hx-gen2}"
 
-find_cmps() {
-    for d in /sys/bus/pci/devices/*; do
-        [[ -f "$d/vendor" && -f "$d/device" ]] || continue
-        [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"
-    done | sort
+CYCLE="$PREFIX/rejoin16-cycle.sh"
+HANDOFF="$PREFIX/cmp90hx-gen2-handoff.sh"
+MINIMAL="$PREFIX/cmp90hx-gen2-minimal.sh"
+READER="$PREFIX/maskread.py"
+
+MASK_FEAT=0x00823800
+MASK_XVE=0x00088fe8
+
+FEAT_CYCLES="${CMP90HX_FEAT_CYCLES:-4}"
+XVE_TRIES=13
+SOFT_TRIES=13
+SOFT_ROUNDS="${CMP90HX_SOFT_ROUNDS:-3}"
+TOTAL_TIMEOUT="${CMP90HX_TOTAL_TIMEOUT:-3600}"
+
+LOG="/root/cmp90hx-gen2-exact-worked-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$LOG") 2>&1
+
+log(){ printf '[cmp90hx-exact] %s\n' "$*"; }
+
+START="$(date +%s)"
+
+check_timeout(){
+    local e
+    e=$(( $(date +%s) - START ))
+    if (( e >= TOTAL_TIMEOUT )); then
+        log "FAIL: timeout ${e}s/${TOTAL_TIMEOUT}s"
+        log "Reboot the server and run PCIe GEN2 again; card state varies between boots."
+        exit 1
+    fi
 }
 
-upstream_of() {
-    basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$1")")"
+need_file(){
+    [[ -f "$1" ]] || {
+        log "FAIL: missing file: $1"
+        exit 10
+    }
 }
 
-card_is_gen2() {
-    local cmp="$1" up speed endpoint upstream
-    up="$(upstream_of "$cmp")"
-    speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"
-    endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"
-    upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"
-    [[ "$speed" == *"5.0 GT/s"* ]] && [[ "$endpoint" == *"Speed 5GT/s"* ]] && [[ "$upstream" == *"Speed 5GT/s"* ]]
+check_real_cycle(){
+    need_file "$CYCLE"
+
+    if grep -q 'via resource0' "$CYCLE" 2>/dev/null; then
+        log "FAIL: $CYCLE is bad direct-writer shim, not real rejoin16-cycle"
+        exit 11
+    fi
+
+    if ! grep -Eq 'rejoin16-next-write|canary-success|restore_full|cmpunlocker' "$CYCLE" 2>/dev/null; then
+        log "FAIL: $CYCLE does not look like real rejoin16-cycle"
+        exit 12
+    fi
+
+    chmod +x "$CYCLE" "$HANDOFF" "$MINIMAL" 2>/dev/null || true
+    log "real rejoin16-cycle accepted: $CYCLE"
 }
 
-failed_cards() {
-    local cmps cmp out=()
-    mapfile -t cmps < <(find_cmps)
-    for cmp in "${cmps[@]}"; do
-        card_is_gen2 "$cmp" || out+=("$cmp")
+runtime_check(){
+    need_file "$HANDOFF"
+    need_file "$MINIMAL"
+    need_file "$READER"
+    check_real_cycle
+}
+
+find_cmps(){
+    lspci -Dnn | awk '/10de:220d/ {print $1}' | sort
+}
+
+mask_val(){
+    local bdf="$1" addr="$2"
+    python3 "$READER" "$bdf" "$addr" 2>/dev/null | awk '{print $1}'
+}
+
+upstream_of(){
+    local bdf="$1"
+    basename "$(dirname "$(readlink -f "/sys/bus/pci/devices/$bdf")")"
+}
+
+stop_service_hooks(){
+    log "disable old cmp90hx service/hooks"
+    systemctl stop cmp90hx-gen2.service 2>/dev/null || true
+    systemctl disable cmp90hx-gen2.service 2>/dev/null || true
+    systemctl reset-failed cmp90hx-gen2.service 2>/dev/null || true
+    rm -f /etc/systemd/system/cmp90hx-gen2.service
+    rm -f /etc/systemd/system/multi-user.target.wants/cmp90hx-gen2.service
+    rm -f /etc/profile.d/cmp90hx-pwner-login.sh
+    rm -rf /run/cmp90hx-gen2-reset-done
+    systemctl daemon-reload 2>/dev/null || true
+}
+
+stop_gpu_users(){
+    log "stop GPU users"
+    systemctl stop nvidia-persistenced 2>/dev/null || true
+    systemctl stop ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+    pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
+
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k /dev/nvidia* 2>/dev/null || true
+    fi
+
+    sleep 2
+}
+
+nvidia_loaded(){
+    lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'
+}
+
+show_nvidia(){
+    local tag="$1" loaded
+    loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+    log "$tag nvidia modules: ${loaded:-none}"
+}
+
+unbind_nvidia_devices(){
+    local dev bdf
+
+    [[ -d /sys/bus/pci/drivers/nvidia ]] || return 0
+
+    log "unbind all devices from nvidia"
+    for dev in /sys/bus/pci/drivers/nvidia/0000:*:*.*; do
+        [[ -e "$dev" ]] || continue
+        bdf="$(basename "$dev")"
+        log "$bdf unbind from nvidia"
+        echo "$bdf" > /sys/bus/pci/drivers/nvidia/unbind 2>/dev/null || true
     done
-    printf '%s\n' "${out[@]}"
+
+    sleep 2
 }
 
-verify_links() {
-    local cmps cmp up speed width endpoint upstream total=0 okc=0 failed=()
-    mapfile -t cmps < <(find_cmps)
-    (( ${#cmps[@]} > 0 )) || { log "no CMP 90HX 10de:220d devices found"; return 2; }
+remove_nvidia_once(){
+    modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+    modprobe -r nvidia-vgpu-vfio nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+    rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true
+}
 
-    for cmp in "${cmps[@]}"; do
-        total=$((total+1))
-        up="$(upstream_of "$cmp")"
-        speed="$(cat "/sys/bus/pci/devices/${cmp}/current_link_speed" 2>/dev/null || true)"
-        width="$(cat "/sys/bus/pci/devices/${cmp}/current_link_width" 2>/dev/null || true)"
-        endpoint="$(lspci -Dvv -s "$cmp" | grep "LnkSta:" | head -1 || true)"
-        upstream="$(lspci -Dvv -s "$up" | grep "LnkSta:" | head -1 || true)"
-        log "$cmp upstream=$up speed=$speed width=$width"
-        log "  endpoint $endpoint"
-        log "  upstream $upstream"
-        if card_is_gen2 "$cmp"; then
-            okc=$((okc+1))
-        else
-            failed+=("$cmp")
+force_unload_nvidia(){
+    local pass loaded
+
+    show_nvidia "before unload"
+
+    for pass in 1 2 3 4 5; do
+        check_timeout
+
+        log "force unload nvidia pass $pass/5"
+        stop_gpu_users
+        remove_nvidia_once
+        sleep 2
+
+        if ! nvidia_loaded; then
+            log "nvidia stack unloaded"
+            return 0
+        fi
+
+        loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+        log "still loaded: ${loaded:-unknown}"
+
+        unbind_nvidia_devices
+        remove_nvidia_once
+        sleep 2
+
+        if ! nvidia_loaded; then
+            log "nvidia stack unloaded after unbind"
+            return 0
         fi
     done
 
-    log "GEN2 $okc/$total"
-    if (( ${#failed[@]} > 0 )); then
-        log "not Gen2 yet: ${failed[*]}"
-    fi
-    [[ "$okc" == "$total" ]]
+    show_nvidia "FAILED unload"
+    log "FAIL: cannot unload nvidia; FEAT known-good context not available"
+    return 1
 }
 
-handoff() {
-    [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || { log "missing handoff script"; exit 11; }
-    log "handoff"
-    bash "$PREFIX/cmp90hx-gen2-handoff.sh"
-}
+pci_reset_card(){
+    local bdf="$1"
 
-run_minimal() { # <label> <pci_reset> <tries>
-    local label="$1" pci_reset="$2" tries="${3:-$SOFT_MASK_TRIES}"
-    [[ -x "$PREFIX/cmp90hx-gen2-minimal.sh" ]] || { log "missing minimal script"; exit 12; }
-    log "Gen2 runtime: ${label} pci_reset=${pci_reset} tries=${tries}"
-    CMP90HX_PCI_RESET="$pci_reset" \
-    CMP90HX_MASK_OPEN_TRIES="$tries" \
-    bash "$PREFIX/cmp90hx-gen2-minimal.sh"
-    sleep 5
-}
-
-soft_pass() { # <label>
-    local label="$1"
-    log "=== ${label}: handoff -> adaptive minimal -> verify ==="
-    handoff
-    run_minimal "$label" 0 "$SOFT_MASK_TRIES" || true
-    verify_links
-}
-
-rescue_pass() {
-    log "=== rescue: handoff -> adaptive minimal with targeted PCI reset -> verify ==="
-    handoff
-    CMP90HX_PCI_RESET=1 CMP90HX_MASK_OPEN_TRIES="$AGGR_MASK_TRIES" bash "$PREFIX/cmp90hx-gen2-minimal.sh" || true
-    sleep 5
-    verify_links
-}
-
-[[ "${1:-}" == "--verify-only" ]] && { verify_links; exit $?; }
-
-if verify_links; then
-    log "already Gen2"
-    exit 0
-fi
-
-start="$(date +%s)"
-cycle=1
-
-while true; do
-    now="$(date +%s)"
-    elapsed=$((now - start))
-    log "convergence cycle ${cycle}, elapsed ${elapsed}s/${MAX_WAIT}s"
-
-    if soft_pass "adaptive pass ${cycle}"; then
-        log "Gen2 verified after adaptive pass ${cycle}"
-        exit 0
-    fi
-
-    mapfile -t failed < <(failed_cards)
-    log "adaptive pass ${cycle} left non-Gen2 cards: ${failed[*]:-none}"
-
-    if rescue_pass; then
-        log "rescue pass reached Gen2; running mandatory final soft pass"
+    if [[ -w "/sys/bus/pci/devices/$bdf/reset" ]]; then
+        log "$bdf PCI function reset"
+        echo 1 > "/sys/bus/pci/devices/$bdf/reset" 2>/dev/null || true
+        sleep 5
     else
-        log "rescue pass did not leave all cards Gen2; running mandatory final soft pass anyway"
+        log "$bdf no writable PCI reset"
+    fi
+}
+
+rescan_pci(){
+    log "PCI rescan"
+    echo 1 > /sys/bus/pci/rescan 2>/dev/null || true
+    sleep 3
+}
+
+wait_bdf(){
+    local bdf="$1" i
+
+    for i in $(seq 1 40); do
+        [[ -d "/sys/bus/pci/devices/$bdf" ]] || { sleep 1; continue; }
+        [[ -e "/sys/bus/pci/devices/$bdf/resource0" ]] || { sleep 1; continue; }
+        log "$bdf present"
+        return 0
+    done
+
+    log "$bdf WARN: not present after reset/rescan wait"
+    return 1
+}
+
+run_real_handoff(){
+    local bdf="$1" out rc loaded
+
+    log "$bdf real handoff: stock/orig -> patched"
+    set +e
+    out="$(CMP90_BDF="$bdf" CMP90_PREFIX="$PREFIX" bash "$HANDOFF" 2>&1)"
+    rc=$?
+    set -e
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && log "$bdf handoff: $line"
+    done <<< "$out"
+
+    loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+    log "$bdf modules after handoff: ${loaded:-none}"
+
+    if grep -qi 'patched module already active' <<< "$out"; then
+        log "$bdf BAD_HANDOFF: patched module already active"
+        return 30
     fi
 
-    if soft_pass "final soft pass ${cycle}"; then
-        log "Gen2 verified after rescue + final soft pass ${cycle}"
+    if ! nvidia_loaded; then
+        log "$bdf BAD_HANDOFF: nvidia module not loaded after handoff"
+        return 31
+    fi
+
+    sleep 5
+    return "$rc"
+}
+
+prepare_feat_exact_context(){
+    local bdf="$1" try
+
+    for try in 1 2 3; do
+        check_timeout
+
+        log "$bdf prepare FEAT exact context try $try/3"
+
+        force_unload_nvidia || true
+        pci_reset_card "$bdf"
+        rescan_pci
+        wait_bdf "$bdf" || true
+
+        if run_real_handoff "$bdf"; then
+            log "$bdf FEAT exact context ready"
+            return 0
+        fi
+
+        log "$bdf FEAT context failed, retry"
+        force_unload_nvidia || true
+        sleep 3
+    done
+
+    log "$bdf FAIL: cannot prepare exact FEAT context"
+    return 1
+}
+
+retrain_gen2(){
+    local bdf="$1" up lc nc
+
+    up="$(upstream_of "$bdf")"
+    log "$bdf retrain Gen2 via upstream=$up"
+
+    setpci -s "$bdf" CAP_EXP+2c.w=0x0002 2>/dev/null || true
+    setpci -s "$up"  CAP_EXP+2c.w=0x0002 2>/dev/null || true
+
+    lc="$(setpci -s "$up" CAP_EXP+10.w 2>/dev/null || true)"
+    if [[ -n "$lc" ]]; then
+        printf -v nc '0x%x' $(( (16#$lc) | 0x20 ))
+        setpci -s "$up" CAP_EXP+10.w="$nc" 2>/dev/null || true
+    fi
+
+    sleep 3
+}
+
+real_cycle_write(){
+    local bdf="$1" addr="$2" tag="$3" out rc cur
+
+    log "$bdf $tag: REAL rejoin16-cycle $addr -> 0xffffffff"
+
+    set +e
+    out="$(CMP90_BDF="$bdf" CMP90_PREFIX="$PREFIX" CMP90_READER="$READER" bash "$CYCLE" "$addr" 0xffffffff 2>&1)"
+    rc=$?
+    set -e
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && log "$bdf cycle: $line"
+    done <<< "$out"
+
+    if (( rc != 0 )); then
+        log "$bdf WARN: real rejoin16-cycle rc=$rc addr=$addr"
+    fi
+
+    cur="$(mask_val "$bdf" "$addr")"
+    log "$bdf $addr $tag immediate readback=${cur:-none}"
+    sleep 0.25
+    cur="$(mask_val "$bdf" "$addr")"
+    log "$bdf $addr $tag 250ms readback=${cur:-none}"
+    sleep 1
+    cur="$(mask_val "$bdf" "$addr")"
+    log "$bdf $addr $tag 1s readback=${cur:-none}"
+}
+
+open_feat_exact_worked(){
+    local bdf="$1" i
+
+    log "============================================================"
+    log "$bdf STEP 1: FEAT by exact worked method"
+    log "$bdf masks before FEAT: FEAT=$(mask_val "$bdf" "$MASK_FEAT") XVE=$(mask_val "$bdf" "$MASK_XVE")"
+
+    for i in $(seq 1 "$FEAT_CYCLES"); do
+        check_timeout
+
+        log "$bdf FEAT cycle $i/$FEAT_CYCLES"
+
+        prepare_feat_exact_context "$bdf" || true
+        real_cycle_write "$bdf" "$MASK_FEAT" "FEAT cycle $i/$FEAT_CYCLES"
+        retrain_gen2 "$bdf"
+
+        log "$bdf masks after FEAT cycle $i: FEAT=$(mask_val "$bdf" "$MASK_FEAT") XVE=$(mask_val "$bdf" "$MASK_XVE")"
+    done
+
+    log "$bdf FEAT final: FEAT=$(mask_val "$bdf" "$MASK_FEAT") XVE=$(mask_val "$bdf" "$MASK_XVE")"
+}
+
+run_xve_aggressive_exact_worked(){
+    local label="$1"
+
+    log "============================================================"
+    log "STEP 2: XVE exact worked aggressive minimal: $label"
+    log "env: PCI_RESET=1 RESET_ON_STUCK=1 OPEN_REHANDOFF=1 STUCK_REPEAT_LIMIT=8 MASK_OPEN_TRIES=$XVE_TRIES"
+
+    rm -rf /run/cmp90hx-gen2-reset-done 2>/dev/null || true
+
+    CMP90_PREFIX="$PREFIX" \
+    CMP90_CYCLE="$CYCLE" \
+    CMP90_READER="$READER" \
+    CMP90_HANDOFF="$HANDOFF" \
+    CMP90HX_PCI_RESET=1 \
+    CMP90HX_RESET_ON_STUCK=1 \
+    CMP90HX_OPEN_REHANDOFF=1 \
+    CMP90HX_STUCK_REPEAT_LIMIT=8 \
+    CMP90HX_MASK_OPEN_TRIES="$XVE_TRIES" \
+    bash "$MINIMAL" || true
+
+    sleep 5
+}
+
+run_soft_exact_worked(){
+    local label="$1"
+
+    log "============================================================"
+    log "STEP 3: exact worked soft polish: $label"
+    log "env: PCI_RESET=0 RESET_ON_STUCK=0 OPEN_REHANDOFF=0 MASK_OPEN_TRIES=$SOFT_TRIES"
+
+    CMP90_PREFIX="$PREFIX" \
+    CMP90_CYCLE="$CYCLE" \
+    CMP90_READER="$READER" \
+    CMP90_HANDOFF="$HANDOFF" \
+    CMP90HX_PCI_RESET=0 \
+    CMP90HX_RESET_ON_STUCK=0 \
+    CMP90HX_OPEN_REHANDOFF=0 \
+    CMP90HX_MASK_OPEN_TRIES="$SOFT_TRIES" \
+    bash "$MINIMAL" || true
+
+    sleep 5
+}
+
+verify_one(){
+    local bdf="$1" up speed width endpoint upstream
+
+    up="$(upstream_of "$bdf")"
+    speed="$(cat "/sys/bus/pci/devices/${bdf}/current_link_speed" 2>/dev/null || true)"
+    width="$(cat "/sys/bus/pci/devices/${bdf}/current_link_width" 2>/dev/null || true)"
+    endpoint="$(lspci -Dvv -s "$bdf" | grep 'LnkSta:' | head -1 || true)"
+    upstream="$(lspci -Dvv -s "$up" | grep 'LnkSta:' | head -1 || true)"
+
+    log "$bdf upstream=$up speed=$speed width=$width"
+    log "  endpoint $endpoint"
+    log "  upstream $upstream"
+}
+
+card_is_gen2(){
+    local bdf="$1" up speed endpoint upstream
+
+    up="$(upstream_of "$bdf")"
+    speed="$(cat "/sys/bus/pci/devices/${bdf}/current_link_speed" 2>/dev/null || true)"
+    endpoint="$(lspci -Dvv -s "$bdf" | grep 'LnkSta:' | head -1 || true)"
+    upstream="$(lspci -Dvv -s "$up" | grep 'LnkSta:' | head -1 || true)"
+
+    [[ "$speed" == *"5.0 GT/s"* ]] &&
+    [[ "$endpoint" == *"Speed 5GT/s"* ]] &&
+    [[ "$upstream" == *"Speed 5GT/s"* ]]
+}
+
+verify_all(){
+    local bdf total=0 ok=0 bad=()
+
+    log "VERIFY"
+
+    for bdf in $(find_cmps); do
+        total=$((total + 1))
+        verify_one "$bdf"
+
+        if card_is_gen2 "$bdf"; then
+            ok=$((ok + 1))
+        else
+            bad+=("$bdf")
+        fi
+    done
+
+    log "GEN2 $ok/$total"
+    (( ${#bad[@]} == 0 )) || log "not Gen2 yet: ${bad[*]}"
+
+    [[ "$total" -gt 0 && "$ok" == "$total" ]]
+}
+
+process_one_card_then_worked_xve(){
+    local bdf="$1"
+
+    log "############################################################"
+    log "$bdf CARD START: FEAT exact -> XVE old aggressive -> soft"
+
+    open_feat_exact_worked "$bdf"
+
+    run_xve_aggressive_exact_worked "after FEAT on $bdf"
+    run_soft_exact_worked "after aggressive XVE on $bdf"
+
+    log "$bdf card result masks: FEAT=$(mask_val "$bdf" "$MASK_FEAT") XVE=$(mask_val "$bdf" "$MASK_XVE")"
+    retrain_gen2 "$bdf"
+    verify_one "$bdf"
+
+    log "$bdf CARD END"
+}
+
+# Separate recovery preserved from the previous hard-FEAT implementation.
+# Function overrides live only in this subshell; exact-worked stays intact.
+run_confirmed_hard_feat_fallback() (
+HARD_FEAT_TRIES=13
+mask_val(){ python3 "$PREFIX/maskread.py" "$1" "$2" 2>/dev/null | awk '{print $1}'; }
+failed_feat_cards(){ local b f out=(); for b in $(find_cmps); do card_is_gen2 "$b" && continue; f="$(mask_val "$b" "$MASK_FEAT")"; [[ "$f" != "0xffffffff" ]] && out+=("$b"); done; if (( ${#out[@]} > 0 )); then printf '%s\n' "${out[@]}"; fi; }
+stop_gpu_users(){ systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true; pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true; ls /dev/nvidia* >/dev/null 2>&1 && fuser -k /dev/nvidia* 2>/dev/null || true; sleep 2; }
+nvidia_loaded(){ lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'; }
+force_unload_nvidia(){ local i; for i in 1 2 3 4 5; do stop_gpu_users; modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true; modprobe -r nvidia-vgpu-vfio nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true; rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true; ! nvidia_loaded && { log "nvidia stack unloaded"; return 0; }; log "nvidia stack still loaded; retry $i/5"; sleep 2; done; return 1; }
+retrain_gen2(){ local b="$1" u lc nc; u="$(upstream_of "$b")"; setpci -s "$b" CAP_EXP+2c.w=0x0002 2>/dev/null || true; setpci -s "$u" CAP_EXP+2c.w=0x0002 2>/dev/null || true; lc="$(setpci -s "$u" CAP_EXP+10.w 2>/dev/null || true)"; [[ -n "$lc" ]] && { printf -v nc '0x%x' $(( (16#$lc) | 0x20 )); setpci -s "$u" CAP_EXP+10.w="$nc" 2>/dev/null || true; }; sleep 3; }
+hard_feat_card(){ local b="$1" try feat; log "=== hard FEAT fallback for $b ==="; force_unload_nvidia || return 1; [[ -w "/sys/bus/pci/devices/$b/reset" ]] && { log "$b PCI function reset"; echo 1 > "/sys/bus/pci/devices/$b/reset" 2>/dev/null || true; sleep 5; }; log "PCI rescan"; echo 1 > /sys/bus/pci/rescan 2>/dev/null || true; sleep 5; log "$b masks before hard handoff: $(python3 "$PREFIX/maskread.py" "$b" "$MASK_FEAT" "$MASK_XVE" 2>/dev/null || true)"; dmesg -C 2>/dev/null || true; CMP90_BDF="$b" bash "$PREFIX/cmp90hx-gen2-handoff.sh" || true; for try in $(seq 1 "$HARD_FEAT_TRIES"); do log "$b hard FEAT try $try/$HARD_FEAT_TRIES"; CMP90_BDF="$b" bash "$PREFIX/rejoin16-cycle.sh" "$MASK_FEAT" 0xffffffff || true; feat="$(mask_val "$b" "$MASK_FEAT")"; log "$b masks after hard FEAT try $try: $(python3 "$PREFIX/maskread.py" "$b" "$MASK_FEAT" "$MASK_XVE" 2>/dev/null || true)"; [[ "$feat" == "0xffffffff" ]] && { log "$b FEAT OPENED on hard try $try"; retrain_gen2 "$b"; return 0; }; retrain_gen2 "$b"; done; return 1; }
+hard_feat_fallback(){ local cards b rc=0; mapfile -t cards < <(failed_feat_cards); (( ${#cards[@]} == 0 )) && { log "no cards need hard FEAT fallback"; return 0; }; log "hard FEAT fallback target cards: ${cards[*]}"; for b in "${cards[@]}"; do card_is_gen2 "$b" && continue; [[ "$(mask_val "$b" "$MASK_FEAT")" == "0xffffffff" ]] && continue; hard_feat_card "$b" || rc=1; done; return "$rc"; }
+hard_feat_fallback
+)
+
+main(){
+    local bdf round
+
+    [[ "$(id -u)" == "0" ]] || {
+        echo "run as root"
+        exit 1
+    }
+
+    log "LOG: $LOG"
+    log "prefix=$PREFIX"
+    log "feat_cycles=$FEAT_CYCLES xve_tries=$XVE_TRIES soft_rounds=$SOFT_ROUNDS soft_tries=$SOFT_TRIES timeout=$TOTAL_TIMEOUT"
+    log "IMPORTANT: no direct writer, no resource0 writer, no XVE clone"
+
+    stop_service_hooks
+    runtime_check
+
+    mapfile -t BDFS < <(find_cmps)
+
+    (( ${#BDFS[@]} > 0 )) || {
+        log "FAIL: no CMP 90HX cards found"
+        exit 2
+    }
+
+    log "cards: ${BDFS[*]}"
+
+    if verify_all; then
+        log "already Gen2 on all cards"
         exit 0
     fi
 
-    now="$(date +%s)"
-    elapsed=$((now - start))
-    if (( elapsed >= MAX_WAIT )); then
-        log "FAIL: Gen2 was not verified inside ${MAX_WAIT}s"
-        exit 1
+    log "INITIAL clean unload"
+    force_unload_nvidia || true
+    rescan_pci
+    verify_all || true
+
+    for bdf in "${BDFS[@]}"; do
+        check_timeout
+        # Earlier global passes can recover other cards. Check current state.
+        if card_is_gen2 "$bdf"; then
+            log "$bdf already Gen2; skip per-card FEAT reset/recovery"
+            continue
+        fi
+        process_one_card_then_worked_xve "$bdf"
+
+        if verify_all; then
+            log "SUCCESS: GEN2 all/all"
+            exit 0
+        fi
+    done
+
+    log "############################################################"
+    log "FINAL: repeat only exact worked aggressive XVE + exact soft polish"
+
+    run_xve_aggressive_exact_worked "final global aggressive"
+    verify_all || true
+
+    for round in $(seq 1 "$SOFT_ROUNDS"); do
+        check_timeout
+
+        run_soft_exact_worked "final soft round $round/$SOFT_ROUNDS"
+
+        if verify_all; then
+            log "SUCCESS: GEN2 all/all"
+            exit 0
+        fi
+
+        sleep 10
+    done
+
+    log "LAST RESCUE: confirmed hard-FEAT reset and fresh writes for remaining closed-FEAT cards"
+    run_confirmed_hard_feat_fallback || true
+    run_xve_aggressive_exact_worked "after confirmed hard-FEAT recovery"
+    run_soft_exact_worked "final soft after confirmed hard-FEAT recovery"
+    if verify_all; then
+        log "SUCCESS: GEN2 all/all after confirmed hard-FEAT recovery"
+        exit 0
     fi
 
-    mapfile -t failed < <(failed_cards)
-    log "cycle ${cycle} incomplete; still not Gen2: ${failed[*]:-unknown}; retry in ${INTERVAL}s"
-    sleep "$INTERVAL"
-    cycle=$((cycle + 1))
-done
+    log "FAIL: not all cards reached Gen2"
+    log "Reboot the server and run PCIe GEN2 again. Card state varies between boots; another attempt may help."
+    verify_all || true
+    exit 1
+}
+
+main "$@"
 EOF_APPLY
-    chmod +x "$APPLY_SCRIPT"
+    chmod +x "$APPLY_SCRIPT" || return $?
 }
 
 clean_install_unlock() {
@@ -1407,25 +1802,29 @@ show_apply_gen2() {
     TOTAL_STEPS=3
     clear_left
     banner
-    [[ -x "$PREFIX/cmp90hx-gen2-handoff.sh" ]] || {
-        fail 'COMPUTE UNLOCK must be installed first'
-        ui '\nPress Enter to return: '
-        [[ -t 0 ]] && read -r _ || true
-        return 1
-    }
-    [[ -x "$PREFIX/bar0poke" ]] || {
-        fail 'missing installed bar0poke; install COMPUTE UNLOCK first'
-        ui '\nPress Enter to return: '
-        [[ -t 0 ]] && read -r _ || true
-        return 1
-    }
-    run_step 'disable Gen2 autostart' remove_obsolete_boot_hook
-    run_step 'write archive Gen2 runtime' write_gen2_runtime
-    run_step 'apply PCIe Gen2 now' apply_now
-    ok 'PCIe GEN2 COMPLETE'
-    ui '\nGen2 is manual. Run this item again after every reboot.\n'
-    ui 'Press Enter to return: '
+    if [[ ! -x "$PREFIX/cmp90hx-gen2-handoff.sh" || ! -x "$PREFIX/bar0poke" ]]; then
+        fail 'Required driver runtime is missing. Install COMPUTE UNLOCK first.'
+    elif ! run_step 'disable Gen2 autostart' remove_obsolete_boot_hook; then
+        fail 'Could not disable the old boot hook. See the right log pane.'
+    elif ! run_step 'write complete exact Gen2 runtime' write_gen2_runtime; then
+        fail 'Could not write the Gen2 runtime. See the right log pane.'
+    else
+        ui '\nFull exact-worked method first; strongest hard-FEAT rescue only for remaining stuck cards.\n'
+        ui 'Exact recovery: reset/handoff and FEAT/XVE passes; last rescue: target reset then 13 fresh FEAT writes.\n'
+        ui 'This can take several minutes. Details remain in the right log pane.\n'
+        if run_step 'apply Gen2 with exact recovery' apply_now; then
+            ok 'PCIe GEN2 COMPLETE'
+            ui '\nGen2 is manual. Run this item again after every reboot.\n'
+        else
+            warn 'Gen2 could not be enabled on all cards.'
+            ui 'Please reboot the server, then run PCIe GEN2 again.\n'
+            ui 'Card state varies between boots; another attempt may succeed, but is not guaranteed.\n'
+            ui 'No reboot is started automatically. Both tmux panes remain open.\n'
+        fi
+    fi
+    ui '\nPress Enter to return to the menu: '
     [[ -t 0 ]] && read -r _ || true
+    return 0
 }
 
 remove_optional_helpers(){
@@ -1565,17 +1964,25 @@ PCIe Gen2 is manual and is not enabled at boot.
 Run --gen2 again after every reboot when Gen2 is wanted.
 
 Gen2 mask-open attempts per card/register/pass:
-  soft=13, aggressive=13 (fixed)
+  soft=13, aggressive XVE=13 (fixed)
+  confirmed hard-FEAT recovery=13 fresh attempts after target reset
+  CMP90HX_FEAT_CYCLES=4
+  CMP90HX_SOFT_ROUNDS=3
 Convergence timing defaults:
-  CMP90HX_APPLY_MAX_WAIT=3600
-  CMP90HX_APPLY_INTERVAL=30
+  CMP90HX_TOTAL_TIMEOUT=3600
 EOF_USAGE
 }
 
 main() {
     case "${1:-}" in
         --compute-unlock|--compute) clean_install_unlock ;;
-        --gen2|--apply-gen2) show_apply_gen2 ;;
+        --gen2|--apply-gen2)
+            show_apply_gen2
+            # A command-line Gen2 action in the split UI also returns to its menu.
+            if [[ "${CMP90HX_TUI_CHILD:-0}" == "1" && -t 0 ]]; then
+                main
+            fi
+            ;;
         --verify|--status) show_verify ;;
         --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;
