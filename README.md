@@ -105,3 +105,97 @@ gpu-idle - Перевод карты в P8 путем записи частот
 
 Это низкоуровневый экспериментальный проект для CMP 90HX. Он заменяет NVIDIA kernel modules и меняет состояние PCIe/GPU во время ручного Gen2-прохода. Используйте на свой риск.
 
+
+---
+
+# English
+
+A tool for CMP 90HX with two independent actions: applying the compute unlock and manually enabling PCIe Gen2.
+
+On a normal launch, the script opens `tmux` automatically and splits the window into two panes: the interface and progress on the left, and a detailed live command log on the right.
+
+![developers](images/main.jpg)
+
+## Main menu
+
+```text
+1) COMPUTE UNLOCK
+2) PCIe GEN2
+3) VERIFY
+4) INSTALL CUDA TOOLKIT
+5) INSTALL 4-BEEP AT START
+6) INSTALL FAN/GPU HELPERS
+7) UNINSTALL
+0) EXIT
+```
+
+![mainmenu](images/menu.jpg)
+
+### COMPUTE UNLOCK
+
+Installs NVIDIA 610.43.03, activates the patched driver, and verifies that the compute restrictions have been removed.
+
+After reboot, `cmp90hx-compute.service` performs only the existing driver initialization sequence: stock -> patched. This is required because the installed driver prevents NVIDIA from being loaded automatically through udev.
+
+### PCIe GEN2
+
+1. Each card sequentially goes through the soft known-good stage. If it does not work, the aggressive stage is used, followed by a mandatory final soft stage for the same card.
+2. After all cards have been processed, their state is checked again. Only cards that are still not running at Gen2 and still have FEAT closed receive the original hard-FEAT recovery: unload NVIDIA -> reset the selected card -> rescan -> handoff -> repeat real FEAT writes with verification and retrain.
+3. After recovery, a final soft stage is performed for the same card, including XVE handling. An already-open FEAT prevents another hard-FEAT reset.
+4. The final verification covers the entire original card list: a disappearing device is not considered a success.
+
+If the procedure fails, the program offers to reboot the server and try again. The state of the cards after boot affects the result - and I do not know why. I was unable to determine the reason after several days of continuous work on it.
+
+## Installation
+
+On a clean Ubuntu installation, Secure Boot must be disabled. Do not connect a monitor to the server during installation: `nouveau` may claim the card before the required driver is installed.
+
+Download the script.
+
+First, select this once:
+
+```text
+1) COMPUTE UNLOCK
+```
+
+After a successful installation, run:
+
+```text
+2) PCIe GEN2
+```
+
+![PCIEGEN2](images/pcie.jpg)
+
+After every subsequent reboot, run only `PCIe GEN2` again. However, because startup behavior is somewhat variable, I recommend avoiding unnecessary server reboots and simply putting the cards into P8 to avoid long waits.
+
+## VERIFY
+
+Checks the existing compute unlock and the current PCIe link state separately. Verification does not apply any changes and does not enable Gen2.
+
+## Additional options
+
+`INSTALL CUDA TOOLKIT` - installs the CUDA Toolkit without replacing the selected driver.
+
+`INSTALL 4-BEEP AT START` - installs four short PC speaker beeps during startup. I personally find this convenient for knowing when the server is ready for an SSH connection.
+
+`INSTALL FAN/GPU HELPERS` - installs the following commands:
+
+```text
+fan-100 - Sets the fans on all cards to 100%
+fan-60 - Sets the fans on all cards to 60%
+fan-auto - Returns all cards to automatic fan control
+gpu-full - Puts the card into P0 by writing clock settings
+gpu-idle - Puts the card into P8 by writing clock settings
+```
+
+`UNINSTALL` - removes the project runtime, driver files, and additional helper commands.
+
+## Referenced work
+
+- `pearlfortune/cmpunlocker` - compute unlock, rejoin15, V67 FEAT/PLM `0x823800/0x823804`.
+- `jdowning100/cmpunlocker` - rejoin16 / PCIe path, XVE/LTSSM `0x088fe8`.
+- `Wh1stle05/cmp90hx` - NVIDIA 610.43.03 Linux installer and patch packaging.
+
+## Warning
+
+This is a low-level experimental project for the CMP 90HX. It replaces NVIDIA kernel modules and changes PCIe/GPU state during the manual Gen2 procedure. Use it at your own risk.
