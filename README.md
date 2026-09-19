@@ -15,6 +15,13 @@
 
 Инструмент для CMP 90HX с двумя независимыми действиями: установка compute unlock и ручное включение PCIe Gen2.
 
+## Совместимость
+
+- NVIDIA CMP 90HX (`10de:220d`)
+- Ubuntu 20.04 / 22.04 / 24.04
+- Debian 11 / 12
+- NVIDIA driver 610.43.03
+- Secure Boot должен быть отключен
 
 ![developers](images/main.jpg)
 
@@ -43,30 +50,43 @@
 
 Последовательно обрабатывает обнаруженные CMP 90HX, пытается включить PCIe Gen2 и после завершения проверяет фактическое состояние PCIe link.
 
-Если включить Gen2 не удалось, программа предложит перезагрузить сервер и повторить запуск.
+Не пугайтесь, если отдельные попытки во время прохода завершаются неудачей. Скрипт использует несколько способов включения Gen2 для каждой карты, поэтому промежуточный `FAIL` сам по себе не означает, что итоговый проход не сработает.
+
+Не прерывайте выполнение и дождитесь, пока скрипт полностью обработает все карты и выведет итоговый результат. На системе с несколькими CMP 90HX полный проход может занимать около 20–30 минут.
+
+Если после полного прохода Gen2 включился не на всех картах, перезагрузите сервер и повторите `PCIe GEN2`. Состояние карт после загрузки может отличаться, поэтому в редких случаях может понадобиться несколько циклов перезагрузки и повторного запуска.
+
+После того как система стабильно работает с Compute Unlock и Gen2, я не рекомендую выключать или перезагружать сервер без необходимости: после каждой перезагрузки PCIe Gen2 нужно включать заново.
 
 ## Установка
 
-На чистой Ubuntu Secure Boot должен быть выключен. Во время установки не подключайте монитор к серверу: `nouveau` может занять карту до установки нужного драйвера.
+Secure Boot должен быть выключен. Во время первой установки не подключайте монитор к CMP 90HX: `nouveau` может занять карту до установки нужного драйвера.
 
-Скачайте скрипт.
+Скачайте и запустите скрипт:
 
-Сначала один раз выберите:
-
-```text
-1) COMPUTE UNLOCK
+```bash
+curl -LO https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/cmp90hxpwner.sh
+chmod +x cmp90hxpwner.sh
+sudo ./cmp90hxpwner.sh
 ```
 
-После успешной установки запускайте:
+Далее:
 
 ```text
-2) PCIe GEN2
+1) COMPUTE UNLOCK - выполнить один раз
+2) PCIe GEN2 - включить Gen2
+3) VERIFY - проверить Compute Unlock и PCIe link
 ```
 
 ![PCIEGEN2](images/pcie.jpg)
 
-После каждой следующей перезагрузки повторно запускайте только `PCIe GEN2` - но учитывая вариативность запуска, чтобы избежать долгого ожидания, я рекомендую не перезагружать сервер а просто уводить карты в P8.
+## После перезагрузки
 
+Compute Unlock сохраняется и активируется автоматически.
+
+PCIe Gen2 не сохраняется - после каждой перезагрузки его нужно включать повторно через `PCIe GEN2`.
+
+Если сервер перезагружать не требуется, для простоя карт можно использовать `gpu-idle`, а перед нагрузкой - `gpu-full`.
 
 ## VERIFY
 
@@ -92,9 +112,9 @@ gpu-idle - Сбрасывает lock частоты ядра и фиксируе
 
 ## Использованные работы
 
-- `pearlfortune/cmpunlocker` — compute unlock, rejoin15, V67 FEAT/PLM `0x823800/0x823804`.
-- `jdowning100/cmpunlocker` — rejoin16 / PCIe path, XVE/LTSSM `0x088fe8`.
-- `Wh1stle05/cmp90hx` — NVIDIA 610.43.03 Linux installer и packaging патчей.
+- [pearlfortune/cmpunlocker](https://github.com/pearlfortune/cmpunlocker) - compute unlock, rejoin15, V67 FEAT/PLM `0x823800/0x823804`.
+- [jdowning100/cmpunlocker](https://github.com/jdowning100/cmpunlocker) - rejoin16 / PCIe path, XVE/LTSSM `0x088fe8`.
+- [Wh1stle05/cmp90hx](https://github.com/Wh1stle05/cmp90hx) - NVIDIA 610.43.03 Linux installer и packaging патчей.
 
 ## Warning
 
@@ -107,6 +127,13 @@ gpu-idle - Сбрасывает lock частоты ядра и фиксируе
 
 A tool for CMP 90HX with two independent actions: applying the compute unlock and manually enabling PCIe Gen2.
 
+## Compatibility
+
+- NVIDIA CMP 90HX (`10de:220d`)
+- Ubuntu 20.04 / 22.04 / 24.04
+- Debian 11 / 12
+- NVIDIA driver 610.43.03
+- Secure Boot must be disabled
 
 ![developers](images/main.jpg)
 
@@ -134,29 +161,43 @@ Installs NVIDIA 610.43.03, activates the patched driver, and verifies that the c
 
 Processes the detected CMP 90HX cards one by one, attempts to enable PCIe Gen2, and verifies the actual PCIe link state when finished.
 
-If Gen2 could not be enabled, the program will offer to reboot the server and try again.
+Do not worry if some attempts fail during the process. The script uses several methods to enable Gen2 on each card, so an intermediate `FAIL` does not necessarily mean that the final result will fail.
+
+Do not interrupt the process. Wait until the script has completely processed every card and printed the final result. On a system with multiple CMP 90HX cards, a full pass may take around 20–30 minutes.
+
+If Gen2 is still not enabled on every card after a complete pass, reboot the server and run `PCIe GEN2` again. GPU state can vary between boots, so in rare cases several reboot-and-retry cycles may be required.
+
+Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecessary shutdowns or reboots, since PCIe Gen2 must be enabled again after every reboot.
 
 ## Installation
 
-On a clean Ubuntu installation, Secure Boot must be disabled. Do not connect a monitor to the server during installation: `nouveau` may claim the card before the required driver is installed.
+Secure Boot must be disabled. During the first installation, do not connect a monitor to the CMP 90HX: `nouveau` may claim the card before the required driver is installed.
 
-Download the script.
+Download and run the script:
 
-First, select this once:
-
-```text
-1) COMPUTE UNLOCK
+```bash
+curl -LO https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/cmp90hxpwner.sh
+chmod +x cmp90hxpwner.sh
+sudo ./cmp90hxpwner.sh
 ```
 
-After a successful installation, run:
+Then:
 
 ```text
-2) PCIe GEN2
+1) COMPUTE UNLOCK - run once
+2) PCIe GEN2 - enable Gen2
+3) VERIFY - check Compute Unlock and the PCIe link
 ```
 
 ![PCIEGEN2](images/pcie.jpg)
 
-After every subsequent reboot, run only `PCIe GEN2` again. However, because startup behavior is somewhat variable, I recommend avoiding unnecessary server reboots and simply putting the cards into P8 to avoid long waits.
+## After reboot
+
+Compute Unlock persists and is activated automatically.
+
+PCIe Gen2 does not persist - after every reboot, enable it again through `PCIe GEN2`.
+
+If the server does not need to be rebooted, use `gpu-idle` while the cards are idle and `gpu-full` before starting a workload.
 
 ## VERIFY
 
@@ -182,9 +223,9 @@ gpu-idle - Resets the core clock lock and fixes VRAM at 405 MHz; the card drops 
 
 ## Referenced work
 
-- `pearlfortune/cmpunlocker` - compute unlock, rejoin15, V67 FEAT/PLM `0x823800/0x823804`.
-- `jdowning100/cmpunlocker` - rejoin16 / PCIe path, XVE/LTSSM `0x088fe8`.
-- `Wh1stle05/cmp90hx` - NVIDIA 610.43.03 Linux installer and patch packaging.
+- [pearlfortune/cmpunlocker](https://github.com/pearlfortune/cmpunlocker) - compute unlock, rejoin15, V67 FEAT/PLM `0x823800/0x823804`.
+- [jdowning100/cmpunlocker](https://github.com/jdowning100/cmpunlocker) - rejoin16 / PCIe path, XVE/LTSSM `0x088fe8`.
+- [Wh1stle05/cmp90hx](https://github.com/Wh1stle05/cmp90hx) - NVIDIA 610.43.03 Linux installer and patch packaging.
 
 ## Warning
 
