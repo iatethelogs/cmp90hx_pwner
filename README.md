@@ -84,8 +84,8 @@
 fan-100 - Выкручивает кулеры всех карт на 100
 fan-60 - Выкручивает кулеры всех карт на 60
 fan-auto - Возвращает картам автоматический режим охлаждения
-gpu-full - перевод карты в P0 путем записи частот
-gpu-idle - Перевод карты в P8 путем записи частот
+gpu-full - Сбрасывает lock частоты ядра/памяти и фиксирует память на 9501 МГц для рабочего режима
+gpu-idle - Сбрасывает lock частоты ядра и фиксирует память на 405 МГц; карта уходит в P8, ядро около 210 МГц
 ```
 
 `UNINSTALL` — удаляет runtime проекта, драйверные файлы и дополнительные helper-команды.
@@ -174,8 +174,8 @@ Checks the existing compute unlock and the current PCIe link state separately. V
 fan-100 - Sets the fans on all cards to 100%
 fan-60 - Sets the fans on all cards to 60%
 fan-auto - Returns all cards to automatic fan control
-gpu-full - Puts the card into P0 by writing clock settings
-gpu-idle - Puts the card into P8 by writing clock settings
+gpu-full - Resets core/memory clock locks and fixes VRAM at 9501 MHz for the full-performance mode
+gpu-idle - Resets the core clock lock and fixes VRAM at 405 MHz; the card drops to P8 with the core around 210 MHz
 ```
 
 `UNINSTALL` - removes the project runtime, driver files, and additional helper commands.
