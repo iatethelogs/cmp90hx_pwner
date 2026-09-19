@@ -1644,22 +1644,19 @@ set -u
 command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is missing"; exit 1; }
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-smi -i "$g" -pm 1 || true
-    max_pl=$(nvidia-smi -i "$g" --query-gpu=power.max_limit --format=csv,noheader,nounits 2>/dev/null | awk '{print int($1)}')
-    if [[ "$max_pl" =~ ^[0-9]+$ && "$max_pl" -gt 0 ]]; then nvidia-smi -i "$g" -pl "$max_pl" || true; fi
     nvidia-smi -i "$g" -rgc || true
+    nvidia-smi -i "$g" -rmc || true
+    nvidia-smi -i "$g" -lmc 9501,9501 || true
 done
 EOF_GPUFULL
     cat > "$HELPER_BIN_DIR/gpu-idle" <<'EOF_GPUIDLE'
 #!/usr/bin/env bash
 set -u
 command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is missing"; exit 1; }
-IDLE_POWER_LIMIT="${GPU_IDLE_POWER_LIMIT:-120}"
-MIN_CLOCK="${GPU_IDLE_MIN_CLOCK:-210}"
-MAX_CLOCK="${GPU_IDLE_MAX_CLOCK:-300}"
 for g in $(nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null); do
     nvidia-smi -i "$g" -pm 1 || true
-    nvidia-smi -i "$g" -pl "$IDLE_POWER_LIMIT" || true
-    nvidia-smi -i "$g" -lgc "$MIN_CLOCK,$MAX_CLOCK" || true
+    nvidia-smi -i "$g" -rgc || true
+    nvidia-smi -i "$g" -lmc 405,405 || true
 done
 EOF_GPUIDLE
     chmod +x "$HELPER_BIN_DIR/fan-100" "$HELPER_BIN_DIR/fan-60" "$HELPER_BIN_DIR/fan-auto" "$HELPER_BIN_DIR/gpu-full" "$HELPER_BIN_DIR/gpu-idle"
