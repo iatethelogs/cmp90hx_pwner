@@ -44,23 +44,41 @@
 
 Устанавливает NVIDIA 610.43.03, активирует патченный драйвер и проверяет снятие вычислительных ограничений.
 
+При первом запуске скрипт блокирует `nouveau`. Если `nouveau` уже был загружен и не смог выгрузиться, Compute Unlock может завершиться сообщением:
+
+`nouveau is still loaded. Reboot once, then run installer again.`
+
+Это ожидаемое поведение. Перезагрузите сервер, снова запустите `cmp90hxpwner.sh` и повторите `COMPUTE UNLOCK`. После перезагрузки блокировка `nouveau` уже будет действовать.
+
 
 
 ### PCIe GEN2
 
 Последовательно обрабатывает обнаруженные CMP 90HX, пытается включить PCIe Gen2 и после завершения проверяет фактическое состояние PCIe link.
 
-Не пугайтесь, если отдельные попытки во время прохода завершаются неудачей. Скрипт использует несколько способов включения Gen2 для каждой карты, поэтому промежуточный `FAIL` сам по себе не означает, что итоговый проход не сработает.
+Не пугайтесь, если отдельные попытки во время прохода завершаются `FAIL`. Скрипт использует несколько способов включения Gen2 для каждой карты, поэтому промежуточная неудача сама по себе не означает, что итоговый проход не сработает.
 
-Не прерывайте выполнение и дождитесь, пока скрипт полностью обработает все карты и выведет итоговый результат. На системе с несколькими CMP 90HX полный проход может занимать около 20–30 минут.
+Не ориентируйтесь на промежуточный результат. Даже если после первого прохода, например, 4 из 5 карт уже работают в Gen2, работа ещё не закончена: скрипт выполнит дополнительные проходы для оставшихся карт и затем повторно проверит весь набор GPU.
 
-Если после полного прохода Gen2 включился не на всех картах, перезагрузите сервер и повторите `PCIe GEN2`. Состояние карт после загрузки может отличаться, поэтому в редких случаях может понадобиться несколько циклов перезагрузки и повторного запуска.
+Не прерывайте программу после первых успешных карт. Дождитесь полного завершения всех проходов и именно итогового результата в логе:
 
-После того как система стабильно работает с Compute Unlock и Gen2, я не рекомендую выключать или перезагружать сервер без необходимости: после каждой перезагрузки PCIe Gen2 нужно включать заново.
+`SUCCESS: GEN2 all/all`
+
+или окончательного сообщения о неудаче.
+
+На системе с несколькими CMP 90HX полный процесс может занимать около 20–30 минут.
+
+Если после полного прохода Gen2 включился не на всех картах, перезагрузите сервер и повторите `PCIe GEN2`. Состояние карт после загрузки может отличаться, поэтому иногда может потребоваться несколько циклов перезагрузки и повторного запуска.
+
+Если появляются явно нетипичные ошибки, карты пропадают из системы или повторные запуски начинают вести себя некорректно, полностью выключите и обесточьте сервер на несколько минут. Это позволяет полностью сбросить состояние GPU. После этого включите сервер и попробуйте снова.
+
+После того как Compute Unlock и Gen2 стабильно работают, я не рекомендую выключать или перезагружать сервер без необходимости. Compute Unlock сохраняется, но PCIe Gen2 после каждой загрузки нужно включать заново.
 
 ## Установка
 
-Secure Boot должен быть выключен. Во время первой установки не подключайте монитор к CMP 90HX: `nouveau` может занять карту до установки нужного драйвера.
+Проект рассчитан на headless-сервер. Монитор к серверу подключать не рекомендуется вообще: установка, Compute Unlock и PCIe Gen2 предполагают работу по SSH. Подключённый дисплей может привести к загрузке `nouveau` и занятию CMP 90HX до того, как будет установлен нужный драйвер.
+
+Secure Boot должен быть выключен.
 
 Скачайте и запустите скрипт:
 
@@ -156,22 +174,40 @@ A tool for CMP 90HX with two independent actions: applying the compute unlock an
 
 Installs NVIDIA 610.43.03, activates the patched driver, and verifies that the compute restrictions have been removed.
 
+On the first run, the script blocks `nouveau`. If `nouveau` was already loaded and could not be unloaded, Compute Unlock may stop with:
+
+`nouveau is still loaded. Reboot once, then run installer again.`
+
+This is expected. Reboot the server, run `cmp90hxpwner.sh` again, and repeat `COMPUTE UNLOCK`. After the reboot, the `nouveau` blacklist will already be active.
+
 
 ### PCIe GEN2
 
 Processes the detected CMP 90HX cards one by one, attempts to enable PCIe Gen2, and verifies the actual PCIe link state when finished.
 
-Do not worry if some attempts fail during the process. The script uses several methods to enable Gen2 on each card, so an intermediate `FAIL` does not necessarily mean that the final result will fail.
+Do not worry if some attempts end with `FAIL`. The script uses several methods to enable Gen2 on each card, so an intermediate failure does not necessarily mean that the final result will fail.
 
-Do not interrupt the process. Wait until the script has completely processed every card and printed the final result. On a system with multiple CMP 90HX cards, a full pass may take around 20–30 minutes.
+Do not judge the result from an intermediate pass. Even if, for example, 4 out of 5 cards are already running at Gen2 after the first pass, the process is not finished: the script will perform additional passes for the remaining cards and then verify the entire GPU set again.
 
-If Gen2 is still not enabled on every card after a complete pass, reboot the server and run `PCIe GEN2` again. GPU state can vary between boots, so in rare cases several reboot-and-retry cycles may be required.
+Do not interrupt the program after the first successful cards. Wait for all passes to complete and for the final result in the log:
 
-Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecessary shutdowns or reboots, since PCIe Gen2 must be enabled again after every reboot.
+`SUCCESS: GEN2 all/all`
+
+or the final failure message.
+
+On a system with multiple CMP 90HX cards, the full process may take around 20–30 minutes.
+
+If Gen2 is still not enabled on every card after a complete run, reboot the server and run `PCIe GEN2` again. GPU state can vary between boots, so several reboot-and-retry cycles may occasionally be required.
+
+If you see clearly abnormal errors, cards disappear from the system, or repeated runs start behaving incorrectly, shut the server down completely and disconnect power for a few minutes. This allows the GPUs to fully reset. Then power the server back on and try again.
+
+Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecessary shutdowns or reboots. Compute Unlock persists, but PCIe Gen2 must be enabled again after every boot.
 
 ## Installation
 
-Secure Boot must be disabled. During the first installation, do not connect a monitor to the CMP 90HX: `nouveau` may claim the card before the required driver is installed.
+This project is designed for headless servers. Avoid connecting a monitor to the server at all: installation, Compute Unlock, and PCIe Gen2 are intended to be performed over SSH. A connected display may cause `nouveau` to load and claim the CMP 90HX before the required driver is installed.
+
+Secure Boot must be disabled.
 
 Download and run the script:
 
