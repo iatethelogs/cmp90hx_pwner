@@ -15,7 +15,6 @@
 
 Инструмент для CMP 90HX с двумя независимыми действиями: установка compute unlock и ручное включение PCIe Gen2.
 
-При обычном запуске скрипт сам открывает `tmux` и делит окно на две панели: слева интерфейс и прогресс, справа подробный живой лог команд.
 
 ![developers](images/main.jpg)
 
@@ -38,17 +37,13 @@
 
 Устанавливает NVIDIA 610.43.03, активирует патченный драйвер и проверяет снятие вычислительных ограничений.
 
-После перезагрузки `cmp90hx-compute.service` выполняет только существующую инициализацию драйвера: штатный → патченный. Это необходимо, поскольку установленный драйвер блокирует автоматическую загрузку NVIDIA через udev. 
 
 
 ### PCIe GEN2
 
-1. Каждая карта последовательно проходит мягкий этап known-good. Если он не помог — агрессивный этап и обязательный заключительный мягкий этап для этой же карты.
-2. После обхода всех карт состояние проверяется заново. Только оставшиеся без Gen2 карты с закрытой FEAT получают исходное hard-FEAT восстановление: выгрузка NVIDIA → сброс выбранной карты → rescan → handoff → повторные реальные записи FEAT с проверкой и retrain.
-3. После восстановления выполняется заключительный мягкий этап для той же карты, включая обработку XVE. Открытый FEAT исключает повторный hard-FEAT сброс.
-4. Итоговая проверка охватывает весь первоначальный список карт: исчезновение устройства не считается успехом.
+Последовательно обрабатывает обнаруженные CMP 90HX, пытается включить PCIe Gen2 и после завершения проверяет фактическое состояние PCIe link.
 
-При неудаче программа предлагает перезагрузить сервер и повторить запуск: состояние карт после загрузки влияет на результат - и я не знаю, почему - разобраться за несколько суток непрерывной работы у меня так и не получилось.
+Если включить Gen2 не удалось, программа предложит перезагрузить сервер и повторить запуск.
 
 ## Установка
 
@@ -112,7 +107,6 @@ gpu-idle - Перевод карты в P8 путем записи частот
 
 A tool for CMP 90HX with two independent actions: applying the compute unlock and manually enabling PCIe Gen2.
 
-On a normal launch, the script opens `tmux` automatically and splits the window into two panes: the interface and progress on the left, and a detailed live command log on the right.
 
 ![developers](images/main.jpg)
 
@@ -135,16 +129,12 @@ On a normal launch, the script opens `tmux` automatically and splits the window 
 
 Installs NVIDIA 610.43.03, activates the patched driver, and verifies that the compute restrictions have been removed.
 
-After reboot, `cmp90hx-compute.service` performs only the existing driver initialization sequence: stock -> patched. This is required because the installed driver prevents NVIDIA from being loaded automatically through udev.
 
 ### PCIe GEN2
 
-1. Each card sequentially goes through the soft known-good stage. If it does not work, the aggressive stage is used, followed by a mandatory final soft stage for the same card.
-2. After all cards have been processed, their state is checked again. Only cards that are still not running at Gen2 and still have FEAT closed receive the original hard-FEAT recovery: unload NVIDIA -> reset the selected card -> rescan -> handoff -> repeat real FEAT writes with verification and retrain.
-3. After recovery, a final soft stage is performed for the same card, including XVE handling. An already-open FEAT prevents another hard-FEAT reset.
-4. The final verification covers the entire original card list: a disappearing device is not considered a success.
+Processes the detected CMP 90HX cards one by one, attempts to enable PCIe Gen2, and verifies the actual PCIe link state when finished.
 
-If the procedure fails, the program offers to reboot the server and try again. The state of the cards after boot affects the result - and I do not know why. I was unable to determine the reason after several days of continuous work on it.
+If Gen2 could not be enabled, the program will offer to reboot the server and try again.
 
 ## Installation
 
