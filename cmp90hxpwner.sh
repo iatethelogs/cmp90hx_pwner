@@ -517,6 +517,7 @@ install_patched_driver() {
         return 20
     }
     sed -i '/^# 7. systemd unit$/,$d' scripts/install.sh
+    mkdir -p /etc/depmod.d
     bash scripts/install.sh
     depmod -a
 }
