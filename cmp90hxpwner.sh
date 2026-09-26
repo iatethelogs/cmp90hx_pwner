@@ -1375,7 +1375,7 @@ SOFT_MASK_TRIES=13
 AGGR_MASK_TRIES=13
 HARD_FEAT_TRIES=13
 STUCK_REPEAT_LIMIT="${CMP90HX_STUCK_REPEAT_LIMIT:-8}"
-TOTAL_TIMEOUT="${CMP90HX_TOTAL_TIMEOUT:-3600}"
+TOTAL_TIMEOUT="${CMP90HX_TOTAL_TIMEOUT:-5000}"
 START="$(date +%s)"
 check_timeout() {
     if (( $(date +%s) - START >= TOTAL_TIMEOUT )); then
@@ -2077,7 +2077,7 @@ Gen2 mask-open attempts per card/register/pass:
   known-good soft=13, aggressive=13 (fixed)
   confirmed hard-FEAT recovery=13 fresh attempts after target reset
 Convergence timing defaults:
-  CMP90HX_TOTAL_TIMEOUT=3600
+  CMP90HX_TOTAL_TIMEOUT=5000
 EOF_USAGE
 }
 
