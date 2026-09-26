@@ -27,9 +27,9 @@ stop_gpu_users_handoff() {
     systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
     pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
     if ls /dev/nvidia* >/dev/null 2>&1; then
-        fuser -k -TERM /dev/nvidia* 2>/dev/null || true
+        fuser -k -TERM /dev/nvidia* >/dev/null 2>&1 || true
         sleep 1
-        fuser -k -KILL /dev/nvidia* 2>/dev/null || true
+        fuser -k -KILL /dev/nvidia* >/dev/null 2>&1 || true
     fi
 }
 
@@ -143,7 +143,16 @@ if [[ -n "$STOCK" ]]; then
     log "priming GPU with stock module: $STOCK"
     log "stock module srcversion: ${stock_srcv:-missing}"
 
-    unload_all || { log "FATAL: cannot unload before stock prime"; exit 1; }
+    if [[ "${CMP90HX_ASSUME_NVIDIA_UNLOADED:-0}" == "1" ]]; then
+        if nvidia_loaded; then
+            log "caller claimed nvidia is unloaded, but stack is still loaded; unloading now"
+            unload_all || { log "FATAL: cannot unload before stock prime"; exit 1; }
+        else
+            log "skip pre-stock unload; caller already unloaded nvidia stack"
+        fi
+    else
+        unload_all || { log "FATAL: cannot unload before stock prime"; exit 1; }
+    fi
 
     modprobe ecc 2>/dev/null || true
     modprobe ecdh_generic 2>/dev/null || true

@@ -21,7 +21,7 @@ POKE="${CMP90_POKE:-$DEFAULT_POKE}"
 
 reload_nvidia_via_handoff() {
     if [[ -x "${SCRIPT_DIR}/cmp90hx-compute-handoff.sh" ]]; then
-        CMP90_BDF="$BDF" bash "${SCRIPT_DIR}/cmp90hx-compute-handoff.sh" || {
+        CMP90_BDF="$BDF" CMP90HX_ASSUME_NVIDIA_UNLOADED=1 bash "${SCRIPT_DIR}/cmp90hx-compute-handoff.sh" || {
             echo "FATAL: cmp90hx handoff failed"
             return 1
         }
