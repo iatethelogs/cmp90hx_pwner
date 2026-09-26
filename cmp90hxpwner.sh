@@ -482,18 +482,8 @@ download_with_retry() {
 
 
 require_stock_nvidia_driver() {
-    local cur lic stock_count
-    cur="$(modinfo -F version nvidia 2>/dev/null || true)"
-    [[ "$cur" == "$DRIVER_VERSION" ]] || {
-        printf 'stock NVIDIA module version is %s, expected %s\n' "${cur:-missing}" "$DRIVER_VERSION"
-        printf 'Install matching NVIDIA %s userland/stock module first. This path downloads only NVIDIA kernel source.\n' "$DRIVER_VERSION"
-        return 20
-    }
-    lic="$(modinfo -F license nvidia 2>/dev/null || true)"
-    printf 'stock NVIDIA module version: %s\n' "$cur"
-    printf 'stock NVIDIA module license: %s\n' "${lic:-unknown}"
-    stock_count="$(find "/lib/modules/$(uname -r)" -name nvidia.ko 2>/dev/null | grep -v 'updates/cmpunlocker-90hx-stockflow' | wc -l | tr -d ' ')"
-    [[ "$stock_count" -gt 0 ]] || { printf 'no stock nvidia.ko found outside cmpunlocker path\n'; return 21; }
+    printf 'stock NVIDIA precheck skipped; clean install flow will remove old candidates and builder will install stock NVIDIA .run if needed\n'
+    return 0
 }
 
 install_patched_driver() {

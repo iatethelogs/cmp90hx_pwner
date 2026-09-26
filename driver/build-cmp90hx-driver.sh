@@ -54,7 +54,7 @@ find_stock_nvidia_module() {
     for p in \
         "/usr/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
         "/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
-        $(find "/usr/lib/modules/${KREL}" "/lib/modules/${KREL}" -name nvidia.ko 2>/dev/null | grep -v '/cmpunlocker-90hx-stockflow/' | sort -u || true); do
+        $(find "/usr/lib/modules/${KREL}" "/lib/modules/${KREL}" -name nvidia.ko 2>/dev/null | grep -v 'cmpunlocker-90hx-stockflow' | sort -u || true); do
         [[ -n "$p" && -f "$p" ]] || continue
         ver="$(modinfo -F version "$p" 2>/dev/null || true)"
         if [[ "$ver" == "$DRIVER_VERSION" ]]; then
