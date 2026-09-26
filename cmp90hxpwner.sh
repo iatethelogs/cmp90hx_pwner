@@ -555,7 +555,7 @@ apply_now() {
     local runner="$RUNTIME_DIR/rejoin17-apply-all.sh"
     [[ -x "$runner" ]] || { printf 'missing Gen2 runtime runner: %s
 ' "$runner"; return 10; }
-    CMP90_RUNTIME_DIR="$RUNTIME_DIR" CMP90_PREFIX="$RUNTIME_DIR" bash "$runner"
+    CMP90_RUNTIME_DIR="$RUNTIME_DIR" CMP90_PREFIX="$PREFIX" bash "$runner"
 }
 
 bind_cmps_to_nvidia() {

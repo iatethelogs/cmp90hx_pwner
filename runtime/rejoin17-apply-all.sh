@@ -22,15 +22,11 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUNTIME_DIR="${CMP90_RUNTIME_DIR:-$SCRIPT_DIR}"
-PREFIX="${CMP90_PREFIX:-$RUNTIME_DIR}"
+PREFIX="${CMP90_PREFIX:-/opt/cmp90hx-gen2}"
 HANDOFF="${CMP90_HANDOFF:-$RUNTIME_DIR/cmp90hx-compute-handoff.sh}"
 CYCLE="${CMP90_CYCLE:-$RUNTIME_DIR/rejoin16-cycle.sh}"
 READER="${CMP90_READER:-$RUNTIME_DIR/maskread.py}"
-if [[ -x "$RUNTIME_DIR/bar0poke" ]]; then
-    BAR0POKE="${CMP90_BAR0POKE:-$RUNTIME_DIR/bar0poke}"
-else
-    BAR0POKE="${CMP90_BAR0POKE:-/opt/cmp90hx-gen2/bar0poke}"
-fi
+BAR0POKE="${CMP90_BAR0POKE:-$PREFIX/bar0poke}"
 
 MASK_FEAT="0x00823800"
 MASK_XVE="0x00088fe8"
@@ -275,7 +271,7 @@ open_mask() { # <bdf> <addr>
         check_timeout
         try_prepare "$bdf" "$try"
 
-        CMP90_BDF="$bdf" bash "$CYCLE" "$addr" 0xffffffff >/dev/null 2>&1 || true
+        CMP90_POKE="$BAR0POKE" CMP90_BDF="$bdf" bash "$CYCLE" "$addr" 0xffffffff >/dev/null 2>&1 || true
 
         cur="$(mask_val "$bdf" "$addr")"
         [[ "$cur" == "0xffffffff" ]] && { log "  $bdf open $addr OK (try $try immediate)"; return 0; }
@@ -432,7 +428,7 @@ hard_feat_card() {
     for try in $(seq 1 "$HARD_FEAT_TRIES"); do
         check_timeout
         log "----- $bdf FEAT try $try/$HARD_FEAT_TRIES -----"
-        CMP90_BDF="$bdf" bash "$CYCLE" "$MASK_FEAT" 0xffffffff || true
+        CMP90_POKE="$BAR0POKE" CMP90_BDF="$bdf" bash "$CYCLE" "$MASK_FEAT" 0xffffffff || true
 
         feat="$(mask_val "$bdf" "$MASK_FEAT")"
         log "$bdf masks after FEAT try $try: $(python3 "$READER" "$bdf" "$MASK_FEAT" "$MASK_XVE" 2>/dev/null || true)"

@@ -15,21 +15,7 @@ VALUE="$2"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BDF="${CMP90_BDF:-$(lspci -Dnn | awk '/10de:220d/ {print $1; exit}')}"
 SPEC=/var/lib/cmpunlocker-rs/rejoin16-next-write.bin
-DEFAULT_POKE="${SCRIPT_DIR}/bar0poke"
-[[ -x "$DEFAULT_POKE" ]] || DEFAULT_POKE="/opt/cmp90hx-gen2/bar0poke"
-POKE="${CMP90_POKE:-$DEFAULT_POKE}"
-
-reload_nvidia_for_rejoin16() {
-    modprobe nvidia || {
-        echo "FATAL: modprobe nvidia failed"
-        return 1
-    }
-    sleep 1
-    nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1
-    sleep 1
-    modprobe nvidia_uvm 2>/dev/null || true
-}
-
+POKE="${CMP90_POKE:-${SCRIPT_DIR}/bar0poke}"
 
 [[ -n "$BDF" ]] || { echo "FATAL: no CMP 90HX (10de:220d) found; set CMP90_BDF"; exit 2; }
 [[ -n "$ADDR" && -n "$VALUE" ]] || { echo "usage: $0 <addr> <value>"; exit 2; }
@@ -98,7 +84,7 @@ dmesg -C 2>/dev/null || true
 # automatically. The patched build is installed in
 # /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow with a depmod
 # override, so this loads the patched nvidia.ko.
-reload_nvidia_for_rejoin16 || exit 1
+modprobe nvidia || { echo "FATAL: modprobe nvidia failed"; exit 1; }
 sleep 1
 nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1   # trigger RM init
 sleep 1
