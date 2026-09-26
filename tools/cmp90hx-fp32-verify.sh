@@ -9,7 +9,7 @@ if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
 fi
 
 if [[ -z "$nvcc_bin" || ! -x "$nvcc_bin" ]]; then
-    printf 'nvcc not found; install CUDA toolkit first\n'
+    printf 'CUDA Toolkit not found: nvcc is missing. Open the main menu and press "Install CUDA Toolkit", then rerun VERIFY/COMPUTE UNLOCK.\n'
     exit 31
 fi
 
