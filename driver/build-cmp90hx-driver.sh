@@ -47,7 +47,6 @@ require_cuda_toolkit() {
 for c in awk curl find gcc install make mkdir modinfo patch sha256sum sort strings tar; do
     command -v "$c" >/dev/null 2>&1 || die "required command missing: $c"
 done
-require_cuda_toolkit
 
 find_stock_nvidia_module() {
     local p ver

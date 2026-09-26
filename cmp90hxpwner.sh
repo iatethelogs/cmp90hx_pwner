@@ -483,7 +483,7 @@ nvidia_uninstall_best_effort() {
 
     if [[ "$PURGE_NVIDIA_PACKAGES" == "1" && -x /usr/bin/apt-get ]]; then
         export DEBIAN_FRONTEND=noninteractive
-        apt_get purge -y 'nvidia-*' 'libnvidia-*' 'cuda-drivers*' 'cuda-toolkit-*' 2>/dev/null || true
+        apt_get purge -y 'nvidia-*' 'libnvidia-*' 'cuda-drivers*'  2>/dev/null || true
         apt_get autoremove -y 2>/dev/null || true
     fi
 
@@ -536,7 +536,7 @@ download_with_retry() {
 
 
 require_stock_nvidia_driver() {
-    printf 'stock NVIDIA precheck skipped; clean install flow removes old candidates and builder installs stock NVIDIA .run if needed\n'
+    printf 'stock NVIDIA precheck skipped; clean flow installs stock NVIDIA before patched build\n'
     return 0
 }
 
