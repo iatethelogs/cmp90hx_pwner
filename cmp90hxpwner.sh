@@ -633,64 +633,76 @@ verify_compute_unlock() {
 }
 
 verify_rejoin_compute_full() {
-    local cmps cmp expected seen modpath smi_failed=0 drv critical
+    local cmps cmp expected seen modpath smi_failed=0 drv
 
     bind_cmps_to_nvidia || return 21
 
     mapfile -t cmps < <(find_cmps)
     expected="${#cmps[@]}"
-    (( expected > 0 )) || { printf 'no CMP 90HX 10de:220d devices found\n'; return 22; }
+    (( expected > 0 )) || { printf 'no CMP 90HX 10de:220d devices found
+'; return 22; }
 
     modpath="$(modinfo -n nvidia 2>/dev/null || true)"
-    printf 'loaded nvidia module path: %s\n' "${modpath:-missing}"
+    printf 'loaded nvidia module path: %s
+' "${modpath:-missing}"
+
     if [[ -z "$modpath" || ! -f "$modpath" ]]; then
-        printf 'loaded nvidia.ko path is missing\n'
+        printf 'loaded nvidia.ko path is missing
+'
         return 23
     fi
 
     if [[ "$modpath" != *'/updates/cmpunlocker-90hx-stockflow/'* ]]; then
-        printf 'nvidia.ko is not loaded from cmpunlocker-90hx-stockflow path\n'
-        printf 'expected patched module under /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow\n'
+        printf 'nvidia.ko is not loaded from cmpunlocker-90hx-stockflow path
+'
+        printf 'expected patched module under /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow
+'
         return 24
     fi
 
-    printf 'patched nvidia.ko path verified; marker check skipped; running FP32 compute speed check\n'
+    printf 'patched nvidia.ko path verified; running FP32 compute speed check
+'
     if [[ -x "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh" ]]; then
         "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh" "${CMP90HX_MIN_FP32_TFLOPS:-15.0}" || return $?
     else
-        printf 'missing helper: %s\n' "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh"
+        printf 'missing helper: %s
+' "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh"
         return 25
     fi
 
     if command -v nvidia-smi >/dev/null 2>&1; then
-        printf '\nnvidia-smi -L:\n'
+        printf '
+nvidia-smi -L:
+'
         nvidia-smi -L || smi_failed=1
         seen="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
-        printf 'nvidia-smi visible GPUs: %s, CMP PCI devices: %s\n' "$seen" "$expected"
+        printf 'nvidia-smi visible GPUs: %s, CMP PCI devices: %s
+' "$seen" "$expected"
         if [[ "$seen" -lt "$expected" ]]; then
-            printf 'not all CMP cards are visible to nvidia-smi\n'
+            printf 'not all CMP cards are visible to nvidia-smi
+'
             smi_failed=1
         fi
 
-        printf '\nGPU summary:\n'
+        printf '
+GPU summary:
+'
         nvidia-smi --query-gpu=index,pci.bus_id,name,driver_version,memory.total --format=csv,noheader 2>/dev/null || true
-
-        printf '\nBAR1 report:\n'
-        nvidia-smi -q -d MEMORY 2>/dev/null | grep -A8 -i 'BAR1' || true
-
-        printf '\nP2P topology read capability:\n'
-        nvidia-smi topo -p2p r 2>/dev/null || true
     else
-        printf 'nvidia-smi missing; cannot verify visible GPUs\n'
+        printf 'nvidia-smi missing; cannot verify visible GPUs
+'
         smi_failed=1
     fi
     [[ "$smi_failed" == "0" ]] || return 26
 
-    printf '\nCMP driver binding:\n'
+    printf '
+CMP driver binding:
+'
     for cmp in "${cmps[@]}"; do
         drv="none"
         [[ -L "/sys/bus/pci/devices/$cmp/driver" ]] && drv="$(basename "$(readlink -f "/sys/bus/pci/devices/$cmp/driver")")"
-        printf '  %s driver=%s numa=%s speed=%s width=%s\n' \
+        printf '  %s driver=%s numa=%s speed=%s width=%s
+' \
             "$cmp" \
             "$drv" \
             "$(cat "/sys/bus/pci/devices/$cmp/numa_node" 2>/dev/null || echo unknown)" \
@@ -699,16 +711,9 @@ verify_rejoin_compute_full() {
         [[ "$drv" == "nvidia" ]] || return 27
     done
 
-    printf '\nRecent critical NVIDIA kernel messages, if any:\n'
-    critical="$(dmesg 2>/dev/null | grep -Ei 'NVRM|Xid|RmInitAdapter|fallen off the bus' | tail -n 30 || true)"
-    if [[ -n "$critical" ]]; then
-        printf '%s\n' "$critical"
-        printf 'warning: critical-looking NVIDIA messages exist in dmesg; inspect manually if verify otherwise passed\n'
-    else
-        printf 'none found\n'
-    fi
-
-    printf '\nPASS_CMP90HX_REJOIN16_BASH_VERIFY\n'
+    printf '
+PASS_CMP90HX_PATCHED_COMPUTE_VERIFY
+'
 }
 
 
@@ -719,7 +724,7 @@ show_verify() {
     clear_left
     banner
     if run_step 'compute unlock' verify_compute_unlock; then :; else failed=1; fi
-    if run_step 'rejoin compute full' verify_rejoin_compute_full; then :; else failed=1; fi
+    if run_step 'patched compute speed' verify_rejoin_compute_full; then :; else failed=1; fi
     if run_step 'Gen2 link' verify_links; then :; else failed=1; fi
     if [[ "$failed" == "0" ]]; then
         ok 'VERIFY COMPLETE'
@@ -957,19 +962,17 @@ menu() {
     banner 1
     ui '1) COMPUTE UNLOCK
 '
-    ui '2) P2P MODE
+    ui '2) ENABLE P2P
 '
     ui '3) PCIe GEN2
 '
     ui '4) VERIFY
 '
-    ui '5) INSTALL CUDA TOOLKIT
+    ui '5) INSTALL 4-BEEP AT START
 '
-    ui '6) INSTALL 4-BEEP AT START
+    ui '6) INSTALL FAN/GPU HELPERS
 '
-    ui '7) INSTALL FAN/GPU HELPERS
-'
-    ui '8) UNINSTALL
+    ui '7) UNINSTALL
 '
     ui '0) EXIT
 
@@ -2057,7 +2060,6 @@ Usage:
   sudo ./rejoin17.sh --p2p-status
   sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --verify
-  sudo ./rejoin17.sh --install-cuda
   sudo ./rejoin17.sh --install-beep
   sudo ./rejoin17.sh --install-helpers
   sudo ./rejoin17.sh --uninstall
@@ -2088,7 +2090,6 @@ main() {
             fi
             ;;
         --verify|--status) show_verify ;;
-        --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;
         --install-helpers|--helpers|--fan-scripts|--gpu-scripts) show_install_helpers ;;
         --uninstall|--rollback|--remove|--cancel) uninstall_all ;;
@@ -2106,10 +2107,9 @@ main() {
                     2) show_enable_p2p ;;
                     3) show_apply_gen2 ;;
                     4) show_verify ;;
-                    5) show_install_cuda ;;
-                    6) show_install_boot_beep ;;
-                    7) show_install_helpers ;;
-                    8)
+                    5) show_install_boot_beep ;;
+                    6) show_install_helpers ;;
+                    7)
                         ui 'Type UNINSTALL to remove everything: '
                         IFS= read -r confirm
                         [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'
