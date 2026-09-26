@@ -3,15 +3,42 @@ set -Eeuo pipefail
 
 min_tflops="${1:-15.0}"
 
-nvcc_bin="$(command -v nvcc || true)"
-if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
-    nvcc_bin="/usr/local/cuda/bin/nvcc"
-fi
+find_cuda_home() {
+    local d nvcc_bin
 
-if [[ -z "$nvcc_bin" || ! -x "$nvcc_bin" ]]; then
-    printf 'CUDA Toolkit is incomplete: nvcc or cuda_runtime.h is missing. Run COMPUTE UNLOCK again or press Install CUDA Toolkit in the main menu.
+    if command -v nvcc >/dev/null 2>&1; then
+        nvcc_bin="$(command -v nvcc)"
+        d="$(cd "$(dirname "$nvcc_bin")/.." && pwd)"
+        if [[ -x "$d/bin/nvcc" ]] && [[ -f "$d/include/cuda_runtime.h" || -f "$d/targets/x86_64-linux/include/cuda_runtime.h" ]]; then
+            printf '%s\n' "$d"
+            return 0
+        fi
+    fi
+
+    for d in "${CUDA_HOME:-}" "${CUDA_PATH:-}" /usr/local/cuda /usr/local/cuda-* /opt/cuda /usr; do
+        [[ -n "$d" && -x "$d/bin/nvcc" ]] || continue
+        [[ -f "$d/include/cuda_runtime.h" || -f "$d/targets/x86_64-linux/include/cuda_runtime.h" ]] || continue
+        printf '%s\n' "$d"
+        return 0
+    done
+
+    return 1
+}
+
+cuda_home="$(find_cuda_home || true)"
+if [[ -z "$cuda_home" ]]; then
+    printf 'CUDA Toolkit is incomplete: nvcc or cuda_runtime.h is missing. Run COMPUTE UNLOCK again or press Install CUDA Toolkit in the main menu.\n'
     exit 31
 fi
+
+nvcc_bin="$cuda_home/bin/nvcc"
+include_flags=()
+lib_flags=()
+
+[[ -d "$cuda_home/include" ]] && include_flags+=("-I$cuda_home/include")
+[[ -d "$cuda_home/targets/x86_64-linux/include" ]] && include_flags+=("-I$cuda_home/targets/x86_64-linux/include")
+[[ -d "$cuda_home/lib64" ]] && lib_flags+=("-L$cuda_home/lib64")
+[[ -d "$cuda_home/targets/x86_64-linux/lib" ]] && lib_flags+=("-L$cuda_home/targets/x86_64-linux/lib")
 
 src="/tmp/cmp90hx_fp32_verify.cu"
 bin="/tmp/cmp90hx_fp32_verify"
@@ -109,5 +136,5 @@ int main(int argc, char **argv) {
 }
 EOF_CU
 
-"$nvcc_bin" -O3 -I"$cuda_home/include" -I"$cuda_home/targets/x86_64-linux/include" -L"$cuda_home/lib64" -L"$cuda_home/targets/x86_64-linux/lib" "$src" -lcublas -o "$bin"
+"$nvcc_bin" -O3 "${include_flags[@]}" "${lib_flags[@]}" "$src" -lcublas -o "$bin"
 "$bin" "$min_tflops"
