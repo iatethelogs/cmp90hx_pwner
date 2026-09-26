@@ -721,17 +721,22 @@ show_verify() {
     STEP_NO=0
     TOTAL_STEPS=3
     local failed=0
+
     clear_left
     banner
-    if run_step 'compute unlock' verify_compute_unlock; then :; else failed=1; fi
-    if run_step 'patched compute speed' verify_rejoin_compute_full; then :; else failed=1; fi
+
+    if run_step 'compute unlock' verify_rejoin_compute_full; then :; else failed=1; fi
+    if run_step 'P2P' verify_p2p_enabled_now; then :; else failed=1; fi
     if run_step 'Gen2 link' verify_links; then :; else failed=1; fi
+
     if [[ "$failed" == "0" ]]; then
         ok 'VERIFY COMPLETE'
     else
         warn 'VERIFY FAILED; details are in the right log pane. Program is still alive.'
     fi
-    ui '\nPress Enter to return: '
+
+    ui '
+Press Enter to return: '
     [[ -t 0 ]] && read -r _ || true
 }
 
