@@ -52,8 +52,8 @@ launch_tui() {
 
     if ! command -v tmux >/dev/null 2>&1; then
         if command -v apt-get >/dev/null 2>&1; then
-            DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 || true
-            DEBIAN_FRONTEND=noninteractive apt-get install -y tmux >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt_get update >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt_get install -y tmux >/dev/null 2>&1 || true
         fi
     fi
     command -v tmux >/dev/null 2>&1 || return 0
@@ -193,10 +193,37 @@ run_step() {
     fi
 }
 
+wait_apt_locks() {
+    local max="${APT_LOCK_TIMEOUT:-900}" start now lock
+    start="$(date +%s)"
+    while true; do
+        if ! command -v fuser >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+            return 0
+        fi
+        now="$(date +%s)"
+        if (( now - start >= max )); then
+            printf "apt/dpkg lock timeout after %ss. Close unattended-upgrades/apt/dpkg and rerun.\n" "$max"
+            fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+            return 100
+        fi
+        printf "apt/dpkg is locked by another process; waiting... (%ss/%ss)\n" "$((now - start))" "$max"
+        fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+        sleep 5
+    done
+}
+
+apt_get() {
+    wait_apt_locks || return $?
+    DEBIAN_FRONTEND=noninteractive command apt-get "$@"
+}
+
 apt_install_base() {
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y ca-certificates curl wget tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
+    apt_get update
+    apt_get install -y ca-certificates curl wget tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
 }
 
 install_cuda_toolkit() {
@@ -227,8 +254,8 @@ install_cuda_toolkit() {
             ;;
     esac
 
-    apt-get update
-    apt-get install -y ca-certificates curl wget gnupg lsb-release
+    apt_get update
+    apt_get install -y ca-certificates curl wget gnupg lsb-release
 
     keyring_deb="/var/tmp/cuda-keyring_1.1-1_${distro}_all.deb"
     keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
@@ -236,8 +263,8 @@ install_cuda_toolkit() {
     download_with_retry "$keyring_url" "$keyring_deb"
     dpkg -i "$keyring_deb"
 
-    apt-get update
-    apt-get install -y cuda-toolkit
+    apt_get update
+    apt_get install -y cuda-toolkit
 
     command -v nvcc >/dev/null 2>&1 && nvcc --version || true
 }
@@ -411,6 +438,33 @@ purge_old_pwner() {
     chmod 0777 "$STATE_DIR" 2>/dev/null || true
 }
 
+remove_nvidia_driver_candidates() {
+    printf "unload current NVIDIA modules\n"
+    stop_gpu_users || true
+    unload_nvidia_modules || true
+
+    printf "remove NVIDIA packages, DKMS and old .run leftovers\n"
+    nvidia_uninstall_best_effort || true
+
+    printf "remove cmp90hx/stockflow module candidates\n"
+    find /lib/modules /usr/lib/modules -type d \( -name "cmpunlocker-90hx-stockflow*" -o -name "cmpunlocker*" -o -name "*cmp90hx*" -o -name "*rejoin*" -o -name "*pwner*" \) -prune -exec rm -rf {} + 2>/dev/null || true
+
+    printf "remove stale NVIDIA modules from updates/extra/weak-updates/dkms\n"
+    find /lib/modules /usr/lib/modules \( -path "*/updates/*" -o -path "*/extra/*" -o -path "*/weak-updates/*" -o -path "*/dkms/*" \) \( -name "nvidia*.ko" -o -name "nvidia*.ko.zst" -o -name "nvidia*.ko.xz" \) -delete 2>/dev/null || true
+
+    rm -f /etc/depmod.d/cmp90hx-gen2.conf /etc/depmod.d/*cmp90hx* /etc/depmod.d/*rejoin* /etc/depmod.d/*pwner* 2>/dev/null || true
+    rm -f /etc/modprobe.d/cmp90hx-gen2-noauto.conf /etc/modprobe.d/*cmp90hx* /etc/modprobe.d/*rejoin* /etc/modprobe.d/*pwner* 2>/dev/null || true
+
+    depmod -a || true
+
+    printf "post-clean nvidia module resolution:\n"
+    modinfo -n nvidia 2>/dev/null || printf "no nvidia module currently resolved\n"
+    if modinfo -n nvidia 2>/dev/null | grep -q "cmpunlocker-90hx-stockflow"; then
+        printf "stale cmpunlocker/stockflow module is still resolved as nvidia\n"
+        return 30
+    fi
+}
+
 nvidia_uninstall_best_effort() {
     stop_gpu_users || true
     unload_nvidia_modules || true
@@ -429,8 +483,8 @@ nvidia_uninstall_best_effort() {
 
     if [[ "$PURGE_NVIDIA_PACKAGES" == "1" && -x /usr/bin/apt-get ]]; then
         export DEBIAN_FRONTEND=noninteractive
-        apt-get purge -y 'nvidia-*' 'libnvidia-*' 'cuda-drivers*' 'cuda-toolkit-*' 2>/dev/null || true
-        apt-get autoremove -y 2>/dev/null || true
+        apt_get purge -y 'nvidia-*' 'libnvidia-*' 'cuda-drivers*' 'cuda-toolkit-*' 2>/dev/null || true
+        apt_get autoremove -y 2>/dev/null || true
     fi
 
     find /lib/modules /usr/lib/modules -type d \( -name 'cmpunlocker*' -o -name '*cmp90hx*' -o -name '*rejoin*' -o -name '*pwner*' \) -prune -exec rm -rf {} + 2>/dev/null || true
@@ -482,7 +536,7 @@ download_with_retry() {
 
 
 require_stock_nvidia_driver() {
-    printf 'stock NVIDIA precheck skipped; clean install flow will remove old candidates and builder will install stock NVIDIA .run if needed\n'
+    printf 'stock NVIDIA precheck skipped; clean install flow removes old candidates and builder installs stock NVIDIA .run if needed\n'
     return 0
 }
 
