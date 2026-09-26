@@ -792,8 +792,10 @@ P2P topo read:
 }
 
 write_p2p_enabled_runtime() {
-    set_p2p_mode enabled || return $?
     write_compute_runtime || return $?
+    rm -f "$P2P_MODE_FILE" 2>/dev/null || true
+    printf 'P2P is manual-only; boot compute runtime remains non-P2P
+'
 }
 
 set_cmp_iommu_identity_now() {
@@ -836,6 +838,25 @@ set_cmp_iommu_identity_now() {
     done
 }
 
+disable_acs_redirects_now() {
+    local dev old new path
+    command -v lspci >/dev/null 2>&1 || return 0
+    command -v setpci >/dev/null 2>&1 || return 0
+
+    for path in /sys/bus/pci/devices/*; do
+        dev="$(basename "$path")"
+        lspci -vv -s "$dev" 2>/dev/null | grep -q ACSCtl || continue
+        old="$(setpci -s "$dev" ECAP_ACS+0x6.w 2>/dev/null || true)"
+        [[ -z "$old" ]] && continue
+        new="$(printf '%04x' $(( 0x$old & ~0x000c )))"
+        if [[ "$new" != "$old" ]]; then
+            printf '%s ACSCtl old=%s new=%s
+' "$dev" "$old" "$new"
+            setpci -s "$dev" ECAP_ACS+0x6.w="$new" 2>/dev/null || true
+        fi
+    done
+}
+
 unload_nvidia_stack_for_p2p() {
     local i loaded
 
@@ -871,22 +892,98 @@ unload_nvidia_stack_for_p2p() {
     return 1
 }
 
-restart_compute_service_for_p2p() {
-    systemctl daemon-reload || true
-    systemctl restart "$COMPUTE_SERVICE" || {
-        printf '
-FAILED: %s restart failed
-' "$COMPUTE_SERVICE"
-        journalctl -u "$COMPUTE_SERVICE" -b -n 180 --no-pager || true
-        return 1
-    }
+find_stock_nvidia_module_for_p2p() {
+    local krel="$1" patched_dir="$2" p
+
+    for p in "/usr/lib/modules/${krel}/updates/dkms/nvidia.ko" \
+             "/lib/modules/${krel}/updates/dkms/nvidia.ko"; do
+        [[ -f "$p" ]] && { printf '%s
+' "$p"; return 0; }
+    done
+
+    find "/lib/modules/${krel}" "/usr/lib/modules/${krel}" -name nvidia.ko 2>/dev/null \
+        | grep -v -- "$patched_dir" \
+        | head -1
+}
+
+wait_gpu_for_p2p() {
+    local i max="${1:-30}"
+    for i in $(seq 1 "$max"); do
+        nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    return 1
+}
+
+load_patched_driver_with_p2p() {
+    local krel patched_dir patched_srcv loaded stock p2p_reg
+
+    krel="$(uname -r)"
+    patched_dir="/usr/lib/modules/${krel}/updates/cmpunlocker-90hx-stockflow"
+    patched_srcv="$(modinfo -F srcversion "${patched_dir}/nvidia.ko" 2>/dev/null || true)"
+    p2p_reg='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=0;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
+
+    [[ -f "${patched_dir}/nvidia.ko" ]] || { printf 'patched nvidia.ko missing: %s
+' "${patched_dir}/nvidia.ko"; return 1; }
+    [[ -n "$patched_srcv" ]] || { printf 'patched nvidia.ko srcversion missing
+'; return 1; }
+
+    disable_acs_redirects_now || true
+
+    stock="$(find_stock_nvidia_module_for_p2p "$krel" "$patched_dir" || true)"
+    if [[ -n "$stock" ]]; then
+        printf 'priming GPU with stock module: %s
+' "$stock"
+        modprobe ecc 2>/dev/null || true
+        modprobe ecdh_generic 2>/dev/null || true
+        insmod "$stock" 2>/dev/null || printf 'WARNING: insmod stock module failed
+'
+        if wait_gpu_for_p2p 20; then
+            printf 'stock module brought the GPU up
+'
+        else
+            printf 'WARNING: stock module did not bring the GPU up
+'
+        fi
+        unload_nvidia_stack_for_p2p || return 1
+    else
+        printf 'WARNING: no stock nvidia.ko found; patched P2P load may fail as first load
+'
+    fi
+
+    printf 'loading patched module with manual P2P RegistryDwords
+'
+    modprobe ecc 2>/dev/null || true
+    modprobe ecdh_generic 2>/dev/null || true
+
+    insmod "${patched_dir}/nvidia.ko" \
+        NVreg_EnableResizableBar=1 \
+        NVreg_DmaRemapPeerMmio=0 \
+        NVreg_RegistryDwords="$p2p_reg" || return 1
+
+    if [[ -f "${patched_dir}/nvidia-uvm.ko" ]]; then
+        insmod "${patched_dir}/nvidia-uvm.ko" 2>/dev/null || modprobe nvidia_uvm 2>/dev/null || true
+    else
+        modprobe nvidia_uvm 2>/dev/null || true
+    fi
+
+    loaded="$(cat /sys/module/nvidia/srcversion 2>/dev/null || true)"
+    if [[ "$loaded" != "$patched_srcv" ]]; then
+        printf "WARNING: loaded srcversion '%s' != patched '%s'
+" "${loaded:-none}" "$patched_srcv"
+    fi
+
+    wait_gpu_for_p2p 30 || { printf 'GPU did not come up after patched P2P load
+'; return 1; }
+    printf 'patched P2P module active
+'
 }
 
 verify_p2p_enabled_now() {
     local d g t modpath bad=0
 
-    printf 'P2P mode: %s
-' "$(p2p_mode_value)"
+    printf 'P2P mode: manual runtime
+'
 
     modpath="$(modinfo -n nvidia 2>/dev/null || true)"
     printf 'nvidia module path: %s
@@ -897,6 +994,11 @@ verify_p2p_enabled_now() {
 '
         bad=1
     fi
+
+    printf '
+NVIDIA params:
+'
+    cat /proc/driver/nvidia/params 2>/dev/null | grep -Ei 'RegistryDwords|P2P|BAR|Resizable|Dma|Peer|Static|Iomap|Feature' || true
 
     printf '
 IOMMU groups:
@@ -931,10 +1033,10 @@ show_enable_p2p() {
     clear_left
     banner
 
-    if [[ "$failed" == "0" ]] && ! run_step 'write P2P enabled runtime' write_p2p_enabled_runtime; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'prepare manual P2P runtime' write_p2p_enabled_runtime; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'stop workers and unload nvidia' unload_nvidia_stack_for_p2p; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'set IOMMU identity' set_cmp_iommu_identity_now; then failed=1; fi
-    if [[ "$failed" == "0" ]] && ! run_step 'reload patched driver with P2P' restart_compute_service_for_p2p; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'load patched driver with P2P' load_patched_driver_with_p2p; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'verify P2P' verify_p2p_enabled_now; then failed=1; fi
 
     if [[ "$failed" == "0" ]]; then
@@ -967,9 +1069,9 @@ menu() {
     banner 1
     ui '1) COMPUTE UNLOCK
 '
-    ui '2) ENABLE P2P
+    ui '2) PCIe GEN2
 '
-    ui '3) PCIe GEN2
+    ui '3) ENABLE P2P
 '
     ui '4) VERIFY
 '
@@ -1006,33 +1108,21 @@ remove_obsolete_boot_hook() {
 
 write_compute_runtime() {
     mkdir -p "$PREFIX" "$STATE_DIR"
-    [[ -f "$P2P_MODE_FILE" ]] || printf 'disabled
-' > "$P2P_MODE_FILE"
-
     cat > "$PREFIX/cmp90hx-gen2-handoff.sh" <<'EOF_COMPUTE_HANDOFF'
 #!/usr/bin/env bash
-# Load CMP90HX patched compute driver. Optional P2P mode is controlled by:
-#   /var/lib/cmp90hx-pwner/p2p.mode = enabled|disabled
-#
-# P2P mode is intentionally runtime-only: Gen2 is still manual and is not
-# applied from this boot path.
+# Load CMP90HX patched compute driver.
+# P2P is deliberately not enabled from boot or from this handoff.
+# Run cmp90hxpwner.sh --p2p-enable manually after PCIe Gen2 when P2P is wanted.
 set -uo pipefail
 
 KREL="$(uname -r)"
 PATCHED_DIR="/usr/lib/modules/${KREL}/updates/cmpunlocker-90hx-stockflow"
 PATCHED_SRCV="$(modinfo -F srcversion "${PATCHED_DIR}/nvidia.ko" 2>/dev/null || true)"
-STATE_DIR="${STATE_DIR:-/var/lib/cmp90hx-pwner}"
-P2P_MODE_FILE="${P2P_MODE_FILE:-${STATE_DIR}/p2p.mode}"
 UNLOAD=(nvidia_drm nvidia_modeset nvidia_uvm nvidia_peermem nvidia)
-P2P_REG='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=0;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
 
 log() { echo "cmp90hx-handoff: $*"; }
 loaded_srcv() { cat /sys/module/nvidia/srcversion 2>/dev/null || true; }
 gpu_ok() { nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; }
-
-p2p_enabled() {
-    [[ "$(cat "$P2P_MODE_FILE" 2>/dev/null || echo disabled)" == "enabled" ]]
-}
 
 wait_gpu() {
     local i
@@ -1112,30 +1202,14 @@ disable_acs_redirects() {
 load_patched_final() {
     modprobe ecc 2>/dev/null || true
     modprobe ecdh_generic 2>/dev/null || true
-    if p2p_enabled; then
-        log "loading patched module with P2P RegistryDwords"
-        insmod "$PATCHED_DIR/nvidia.ko" \
-            NVreg_EnableResizableBar=1 \
-            NVreg_DmaRemapPeerMmio=0 \
-            NVreg_RegistryDwords="$P2P_REG" || return 1
-        [[ -f "$PATCHED_DIR/nvidia-uvm.ko" ]] && insmod "$PATCHED_DIR/nvidia-uvm.ko" 2>/dev/null || modprobe nvidia_uvm 2>/dev/null || true
-    else
-        log "loading patched module without P2P RegistryDwords"
-        modprobe nvidia || return 1
-        modprobe nvidia_uvm 2>/dev/null || true
-    fi
+    log "loading patched module without P2P RegistryDwords"
+    modprobe nvidia || return 1
+    modprobe nvidia_uvm 2>/dev/null || true
 }
 
 [[ -n "$PATCHED_SRCV" ]] || { log "FATAL: patched nvidia.ko missing at $PATCHED_DIR"; exit 1; }
 
-if p2p_enabled; then
-    log "P2P mode: enabled"
-    unload_all || true
-    set_iommu_identity || exit 1
-    disable_acs_redirects || true
-else
-    log "P2P mode: disabled"
-fi
+log "P2P mode: manual-only; compute handoff loads without P2P RegistryDwords"
 
 STOCK="$(find_stock)"
 if [[ -n "$STOCK" ]]; then
@@ -2015,44 +2089,6 @@ uninstall_all() {
     ok 'UNINSTALL COMPLETE'
 }
 
-restart_compute_service_now() {
-    printf "restart compute service with P2P mode: %s\n" "$(p2p_mode_value)"
-
-    stop_gpu_users || true
-    unload_nvidia_modules || true
-
-    systemctl daemon-reload || true
-
-    if ! systemctl restart "$COMPUTE_SERVICE"; then
-        printf "\nFAILED: %s restart failed\n" "$COMPUTE_SERVICE"
-        printf "\n--- systemctl status ---\n"
-        systemctl status "$COMPUTE_SERVICE" --no-pager || true
-        printf "\n--- journalctl ---\n"
-        journalctl -u "$COMPUTE_SERVICE" -b -n 160 --no-pager || true
-        return 1
-    fi
-
-    systemctl is-active --quiet "$COMPUTE_SERVICE" || {
-        printf "\nFAILED: %s is not active after restart\n" "$COMPUTE_SERVICE"
-        journalctl -u "$COMPUTE_SERVICE" -b -n 160 --no-pager || true
-        return 1
-    }
-
-    printf "%s active now\n" "$COMPUTE_SERVICE"
-}
-
-enable_p2p_now() {
-    set_p2p_mode enabled || return $?
-    write_compute_runtime || return $?
-    restart_compute_service_now
-}
-
-disable_p2p_now() {
-    set_p2p_mode disabled || return $?
-    write_compute_runtime || return $?
-    restart_compute_service_now
-}
-
 usage() {
     cat <<EOF_USAGE
 $PROGRAM_NAME
@@ -2061,9 +2097,9 @@ $REPO_URL
 Usage:
   sudo ./rejoin17.sh
   sudo ./rejoin17.sh --compute-unlock
+  sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --p2p-enable
   sudo ./rejoin17.sh --p2p-status
-  sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-beep
   sudo ./rejoin17.sh --install-helpers
@@ -2109,8 +2145,8 @@ main() {
                 IFS= read -r choice
                 case "$choice" in
                     1) clean_install_unlock ;;
-                    2) show_enable_p2p ;;
-                    3) show_apply_gen2 ;;
+                    2) show_apply_gen2 ;;
+                    3) show_enable_p2p ;;
                     4) show_verify ;;
                     5) show_install_boot_beep ;;
                     6) show_install_helpers ;;
