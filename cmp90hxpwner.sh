@@ -589,7 +589,7 @@ verify_compute_unlock() {
 }
 
 verify_rejoin_compute_full() {
-    local cmps cmp expected seen modpath marker_failed=0 smi_failed=0 drv critical
+    local cmps cmp expected seen modpath smi_failed=0 drv critical
 
     bind_cmps_to_nvidia || return 21
 
@@ -610,16 +610,13 @@ verify_rejoin_compute_full() {
         return 24
     fi
 
-    if command -v strings >/dev/null 2>&1; then
-        if ! strings "$modpath" 2>/dev/null | grep -qF 'CMP90_STOCKFLOW_REJOIN16'; then
-            printf 'CMP90_STOCKFLOW_REJOIN16 marker is missing in loaded nvidia.ko\n'
-            marker_failed=1
-        fi
+    printf 'patched nvidia.ko path verified; marker check skipped; running FP32 compute speed check\n'
+    if [[ -x "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh" ]]; then
+        "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh" "${CMP90HX_MIN_FP32_TFLOPS:-15.0}" || return $?
     else
-        printf 'strings command missing; cannot check CMP90_STOCKFLOW_REJOIN16 marker\n'
-        marker_failed=1
+        printf 'missing helper: %s\n' "$SCRIPT_ROOT/tools/cmp90hx-fp32-verify.sh"
+        return 25
     fi
-    [[ "$marker_failed" == "0" ]] || return 25
 
     if command -v nvidia-smi >/dev/null 2>&1; then
         printf '\nnvidia-smi -L:\n'

@@ -2,14 +2,12 @@
 set -Eeuo pipefail
 
 min_tflops="${1:-15.0}"
-nvcc_bin="${NVCC:-}"
 
-if [[ -z "$nvcc_bin" ]]; then
-    nvcc_bin="$(command -v nvcc || true)"
-fi
+nvcc_bin="$(command -v nvcc || true)"
 if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
     nvcc_bin="/usr/local/cuda/bin/nvcc"
 fi
+
 if [[ -z "$nvcc_bin" || ! -x "$nvcc_bin" ]]; then
     printf 'nvcc not found; install CUDA toolkit first\n'
     exit 31
@@ -32,9 +30,9 @@ cat > "$src" <<'EOF_CU'
 
 int main(int argc, char **argv) {
     double min_tflops = argc > 1 ? std::atof(argv[1]) : 15.0;
-    int n = argc > 2 ? std::atoi(argv[2]) : 6144;
-    int warmup = argc > 3 ? std::atoi(argv[3]) : 2;
-    int repeat = argc > 4 ? std::atoi(argv[4]) : 5;
+    int n = 6144;
+    int warmup = 2;
+    int repeat = 5;
 
     int count = 0;
     CHECK_CUDA(cudaGetDeviceCount(&count));
