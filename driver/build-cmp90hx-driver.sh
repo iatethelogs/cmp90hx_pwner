@@ -15,6 +15,8 @@ PATCH_DIR="${REPO}/driver/patches/${DRIVER_VERSION}"
 UPDATES="/usr/lib/modules/${KREL}/updates/cmpunlocker-90hx-stockflow"
 SRC_TARBALL="${CACHE_DIR}/NVIDIA-kernel-module-source-${DRIVER_VERSION}.tar.xz"
 NV_SRC_URL="https://download.nvidia.com/XFree86/NVIDIA-kernel-module-source/NVIDIA-kernel-module-source-${DRIVER_VERSION}.tar.xz"
+NVIDIA_RUN="${CACHE_DIR}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
+NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 
 log(){ echo "[cmp90hx-build] $*"; }
 die(){ echo "[cmp90hx-build][FAIL] $*" >&2; exit 1; }
@@ -25,15 +27,64 @@ for c in awk curl find gcc install make mkdir modinfo patch sha256sum sort strin
     command -v "$c" >/dev/null 2>&1 || die "required command missing: $c"
 done
 
-cur="$(modinfo -F version nvidia 2>/dev/null || true)"
-if [[ "$cur" != "$DRIVER_VERSION" ]]; then
-    cat >&2 <<EOF
-[cmp90hx-build][FAIL] stock NVIDIA module is '$cur', expected '$DRIVER_VERSION'.
-This installer no longer downloads the full NVIDIA .run package.
-Install matching NVIDIA ${DRIVER_VERSION} userland/stock module first, then rerun COMPUTE UNLOCK.
-EOF
-    exit 20
+find_stock_nvidia_module() {
+    local p ver
+    for p in \
+        "/usr/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
+        "/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
+        $(find "/usr/lib/modules/${KREL}" "/lib/modules/${KREL}" -name nvidia.ko 2>/dev/null | grep -v '/cmpunlocker-90hx-stockflow/' | sort -u || true); do
+        [[ -n "$p" && -f "$p" ]] || continue
+        ver="$(modinfo -F version "$p" 2>/dev/null || true)"
+        if [[ "$ver" == "$DRIVER_VERSION" ]]; then
+            printf '%s\n' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+install_stock_nvidia_run() {
+    local tmp cur
+
+    log "stock NVIDIA module ${DRIVER_VERSION} not found; installing NVIDIA .run"
+    mkdir -p "$CACHE_DIR"
+
+    if [[ ! -s "$NVIDIA_RUN" ]]; then
+        log "downloading NVIDIA installer: $NVIDIA_RUN_URL"
+        tmp="${NVIDIA_RUN}.part"
+        rm -f "$tmp"
+        curl -fL --retry 5 --retry-delay 5 --connect-timeout 30 -o "$tmp" "$NVIDIA_RUN_URL"
+        mv -f "$tmp" "$NVIDIA_RUN"
+    fi
+    chmod +x "$NVIDIA_RUN"
+
+    log "stopping GPU users before stock NVIDIA install"
+    systemctl stop nvidia-persistenced ollama open-webui librechat llama-server docker comfyui 2>/dev/null || true
+    fuser -k -TERM /dev/nvidia* 2>/dev/null || true
+    sleep 2
+    fuser -k -KILL /dev/nvidia* 2>/dev/null || true
+    modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+
+    if lsmod | grep -q '^nouveau '; then
+        die "nouveau is loaded; blacklist nouveau, rebuild initramfs and reboot before installing NVIDIA .run"
+    fi
+
+    log "installing stock NVIDIA ${DRIVER_VERSION}"
+    bash "$NVIDIA_RUN" --silent --accept-license --no-questions --no-cc-version-check --no-nouveau-check || die "stock NVIDIA .run install failed"
+
+    depmod -a "$KREL" || depmod -a
+    cur="$(modinfo -F version nvidia 2>/dev/null || true)"
+    [[ "$cur" == "$DRIVER_VERSION" ]] || die "stock NVIDIA module is '${cur:-none}', expected '${DRIVER_VERSION}' after .run install"
+}
+
+stock_module="$(find_stock_nvidia_module || true)"
+if [[ -z "$stock_module" ]]; then
+    install_stock_nvidia_run
+    stock_module="$(find_stock_nvidia_module || true)"
 fi
+[[ -n "$stock_module" ]] || die "stock NVIDIA module ${DRIVER_VERSION} not found after installer"
+log "stock NVIDIA module: $stock_module"
+log "stock NVIDIA module version: $(modinfo -F version "$stock_module" 2>/dev/null || true)"
 
 for p in \
     "${PATCH_DIR}/0014-6104303-cmp90hx-stockflow-rejoin14-multigpu-state.patch" \
