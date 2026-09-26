@@ -1043,8 +1043,43 @@ wait_gpu() {
     return 1
 }
 
+stop_gpu_users_handoff() {
+    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+    pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k -TERM /dev/nvidia* >/dev/null 2>&1 || true
+        sleep 1
+        fuser -k -KILL /dev/nvidia* >/dev/null 2>&1 || true
+    fi
+}
+
+nvidia_loaded() {
+    lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'
+}
+
 unload_all() {
-    modprobe -r "${UNLOAD[@]}" 2>/dev/null || { sleep 2; modprobe -r "${UNLOAD[@]}" 2>/dev/null; }
+    local i loaded
+
+    for i in 1 2 3 4 5; do
+        modprobe -r "${UNLOAD[@]}" 2>/dev/null || true
+        modprobe -r nvidia-vgpu-vfio nvidia_vgpu_vfio "${UNLOAD[@]}" 2>/dev/null || true
+        rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true
+        sleep 1
+
+        if ! nvidia_loaded; then
+            log "nvidia stack unloaded"
+            return 0
+        fi
+
+        loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+        log "nvidia stack still loaded after pass $i/5: ${loaded:-unknown}"
+        stop_gpu_users_handoff
+        sleep 2
+    done
+
+    log "FATAL: nvidia stack is still loaded"
+    lsmod | grep '^nvidia' || true
+    return 1
 }
 
 find_stock() {
@@ -1113,6 +1148,7 @@ load_patched_final() {
     modprobe ecc 2>/dev/null || true
     modprobe ecdh_generic 2>/dev/null || true
     if p2p_enabled; then
+        unload_all || { log "FATAL: cannot unload existing nvidia before P2P patched insmod"; return 1; }
         log "loading patched module with P2P RegistryDwords"
         insmod "$PATCHED_DIR/nvidia.ko" \
             NVreg_EnableResizableBar=1 \
