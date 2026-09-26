@@ -72,6 +72,8 @@ install_cuda_toolkit_if_missing() {
     nvcc_bin="$(find_nvcc || true)"
     if [[ -n "$nvcc_bin" ]]; then
         log "CUDA Toolkit already present: $nvcc_bin"
+        persist_cuda_toolkit "$nvcc_bin" || die "failed to persist CUDA Toolkit path"
+
         "$nvcc_bin" --version || true
         return 0
     fi
@@ -113,6 +115,8 @@ install_cuda_toolkit_if_missing() {
     nvcc_bin="$(find_nvcc || true)"
     [[ -n "$nvcc_bin" ]] || die "CUDA Toolkit install finished but nvcc is still missing"
     log "CUDA Toolkit installed: $nvcc_bin"
+    persist_cuda_toolkit "$nvcc_bin" || die "failed to persist CUDA Toolkit path"
+
     "$nvcc_bin" --version || true
 }
 

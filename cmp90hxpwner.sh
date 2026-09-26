@@ -1871,6 +1871,44 @@ uninstall_all() {
     ok 'UNINSTALL COMPLETE'
 }
 
+restart_compute_service_now() {
+    printf "restart compute service with P2P mode: %s\n" "$(p2p_mode_value)"
+
+    stop_gpu_users || true
+    unload_nvidia_modules || true
+
+    systemctl daemon-reload || true
+
+    if ! systemctl restart "$COMPUTE_SERVICE"; then
+        printf "\nFAILED: %s restart failed\n" "$COMPUTE_SERVICE"
+        printf "\n--- systemctl status ---\n"
+        systemctl status "$COMPUTE_SERVICE" --no-pager || true
+        printf "\n--- journalctl ---\n"
+        journalctl -u "$COMPUTE_SERVICE" -b -n 160 --no-pager || true
+        return 1
+    fi
+
+    systemctl is-active --quiet "$COMPUTE_SERVICE" || {
+        printf "\nFAILED: %s is not active after restart\n" "$COMPUTE_SERVICE"
+        journalctl -u "$COMPUTE_SERVICE" -b -n 160 --no-pager || true
+        return 1
+    }
+
+    printf "%s active now\n" "$COMPUTE_SERVICE"
+}
+
+enable_p2p_now() {
+    set_p2p_mode enabled || return $?
+    write_compute_runtime || return $?
+    restart_compute_service_now
+}
+
+disable_p2p_now() {
+    set_p2p_mode disabled || return $?
+    write_compute_runtime || return $?
+    restart_compute_service_now
+}
+
 usage() {
     cat <<EOF_USAGE
 $PROGRAM_NAME
