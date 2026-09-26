@@ -1133,9 +1133,46 @@ wait_gpu() {
     return 1
 }
 
-unload_all() {
-    modprobe -r "${UNLOAD[@]}" 2>/dev/null || { sleep 2; modprobe -r "${UNLOAD[@]}" 2>/dev/null; }
+
+stop_gpu_users_handoff() {
+    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+    pkill -f 'nvidia-smi|llama-server|ollama|comfyui|python.*cuda|python.*torch|python.*nvidia' 2>/dev/null || true
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k -TERM /dev/nvidia* 2>/dev/null || true
+        sleep 1
+        fuser -k -KILL /dev/nvidia* 2>/dev/null || true
+    fi
 }
+
+nvidia_loaded() {
+    lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'
+}
+
+unload_all() {
+    local i loaded
+
+    for i in 1 2 3 4 5; do
+        modprobe -r "${UNLOAD[@]}" 2>/dev/null || true
+        modprobe -r nvidia-vgpu-vfio nvidia_vgpu_vfio "${UNLOAD[@]}" 2>/dev/null || true
+        rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true
+        sleep 1
+
+        if ! nvidia_loaded; then
+            log "nvidia stack unloaded"
+            return 0
+        fi
+
+        loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+        log "nvidia stack still loaded after pass $i/5: ${loaded:-unknown}"
+        stop_gpu_users_handoff
+        sleep 2
+    done
+
+    log "FATAL: nvidia stack is still loaded"
+    lsmod | grep '^nvidia' || true
+    return 1
+}
+
 
 find_stock() {
     local p
@@ -1213,27 +1250,51 @@ log "P2P mode: manual-only; compute handoff loads without P2P RegistryDwords"
 
 STOCK="$(find_stock)"
 if [[ -n "$STOCK" ]]; then
+    stock_srcv="$(modinfo -F srcversion "$STOCK" 2>/dev/null || true)"
     log "priming GPU with stock module: $STOCK"
-    unload_all
+    log "stock module srcversion: ${stock_srcv:-missing}"
+
+    unload_all || { log "FATAL: cannot unload before stock prime"; exit 1; }
+
     modprobe ecc 2>/dev/null || true
     modprobe ecdh_generic 2>/dev/null || true
-    insmod "$STOCK" 2>/dev/null || log "WARNING: insmod stock module failed"
+
+    if ! insmod "$STOCK"; then
+        rc=$?
+        log "FATAL: stock module insmod failed rc=$rc: $STOCK"
+        log "recent NVIDIA kernel messages:"
+        dmesg 2>/dev/null | grep -Ei 'NVRM|nvidia|Xid|RmInitAdapter|fallen off the bus' | tail -n 40 || true
+        exit 1
+    fi
+
+    loaded="$(loaded_srcv)"
+    log "loaded stock srcversion: ${loaded:-none}"
+
+    if [[ -n "$stock_srcv" && "$loaded" != "$stock_srcv" ]]; then
+        log "FATAL: expected stock srcversion '$stock_srcv', but loaded '${loaded:-none}'"
+        exit 1
+    fi
+
     if wait_gpu 20; then
         log "stock module brought the GPU up"
     else
-        log "WARNING: stock module did not bring the GPU up"
+        log "FATAL: stock module did not bring the GPU up"
+        dmesg 2>/dev/null | grep -Ei 'NVRM|nvidia|Xid|RmInitAdapter|fallen off the bus' | tail -n 40 || true
+        exit 1
     fi
 else
-    log "WARNING: no stock nvidia.ko found; patched module may fail as first load"
+    log "FATAL: no stock nvidia.ko found; stock prime is required for Gen2/rejoin16"
+    exit 1
 fi
 
 log "handing over to the patched module"
-unload_all
+unload_all || { log "FATAL: cannot unload stock module before patched handoff"; exit 1; }
 sleep 2
 load_patched_final || { log "FATAL: patched module load failed"; exit 1; }
 loaded="$(loaded_srcv)"
 if [[ "$loaded" != "$PATCHED_SRCV" ]]; then
-    log "WARNING: loaded srcversion '${loaded:-none}' != patched '$PATCHED_SRCV'"
+    log "FATAL: loaded srcversion '${loaded:-none}' != patched '$PATCHED_SRCV'"
+    exit 1
 fi
 if wait_gpu 30; then
     log "patched module active (srcversion ${loaded:-?})"
@@ -1947,13 +2008,15 @@ clean_install_unlock() {
 
 show_apply_gen2() {
     STEP_NO=0
-    TOTAL_STEPS=3
+    TOTAL_STEPS=4
     clear_left
     banner
     if [[ ! -x "$PREFIX/cmp90hx-gen2-handoff.sh" || ! -x "$PREFIX/bar0poke" ]]; then
         fail 'Required driver runtime is missing. Install COMPUTE UNLOCK first.'
     elif ! run_step 'disable Gen2 autostart' remove_obsolete_boot_hook; then
         fail 'Could not disable the old boot hook. See the right log pane.'
+    elif ! run_step 'write compute handoff runtime' write_compute_runtime; then
+        fail 'Could not write the compute handoff runtime. See the right log pane.'
     elif ! run_step 'write integrated known-good Gen2 runtime' write_gen2_runtime; then
         fail 'Could not write the Gen2 runtime. See the right log pane.'
     else
