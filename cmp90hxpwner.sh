@@ -68,9 +68,20 @@ launch_tui() {
         printf 'export CMP90HX_TUI_CHILD=1\n'
         printf 'export FORCE_COLOR=1\n'
         printf 'export LOG=%q\n' "$LOG"
-        printf 'exec bash %q' "$SELF_PATH"
+        printf 'args_count=%q\n' "$#"
+        printf 'bash %q' "$SELF_PATH"
         for a in "$@"; do printf ' %q' "$a"; done
         printf '\n'
+        printf 'rc=$?\n'
+        printf 'if (( rc != 0 )); then\n'
+        printf '  echo; echo "CMP90HX Pwner command failed with rc=$rc. Returning to main menu. See the right log pane."\n'
+        printf '  sleep 2\n'
+        printf '  exec bash %q\n' "$SELF_PATH"
+        printf 'fi\n'
+        printf 'if (( args_count > 0 )); then\n'
+        printf '  exec bash %q\n' "$SELF_PATH"
+        printf 'fi\n'
+        printf 'exit 0\n'
     } > "$runner"
 
     {
