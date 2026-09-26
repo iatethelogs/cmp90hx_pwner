@@ -9,7 +9,7 @@ if [[ -z "$nvcc_bin" && -x /usr/local/cuda/bin/nvcc ]]; then
 fi
 
 if [[ -z "$nvcc_bin" || ! -x "$nvcc_bin" ]]; then
-    printf 'CUDA Toolkit not found: nvcc is missing. Open the main menu and press "Install CUDA Toolkit", then rerun VERIFY/COMPUTE UNLOCK.\n'
+    printf 'CUDA Toolkit is incomplete: nvcc or cuda_runtime.h is missing. Run COMPUTE UNLOCK again or press Install CUDA Toolkit in the main menu.
     exit 31
 fi
 
@@ -109,5 +109,5 @@ int main(int argc, char **argv) {
 }
 EOF_CU
 
-"$nvcc_bin" -O3 "$src" -lcublas -o "$bin"
+"$nvcc_bin" -O3 -I"$cuda_home/include" -I"$cuda_home/targets/x86_64-linux/include" -L"$cuda_home/lib64" -L"$cuda_home/targets/x86_64-linux/lib" "$src" -lcublas -o "$bin"
 "$bin" "$min_tflops"
