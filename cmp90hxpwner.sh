@@ -781,44 +781,161 @@ P2P topo read:
     nvidia-smi topo -p2p r 2>/dev/null || true
 }
 
-apply_p2p_mode_now() {
-    write_compute_runtime
-    systemctl restart "$COMPUTE_SERVICE"
+write_p2p_enabled_runtime() {
+    set_p2p_mode enabled || return $?
+    write_compute_runtime || return $?
 }
 
-show_p2p_menu() {
-    local choice
-    while true; do
-        clear_left
-        banner
-        ui 'Current P2P mode: %s
+set_cmp_iommu_identity_now() {
+    local dev group type_file before after groups=()
 
-' "$(p2p_mode_value)"
-        ui '1) ENABLE P2P AT BOOT
-'
-        ui '2) DISABLE P2P AT BOOT
-'
-        ui '3) APPLY CURRENT MODE NOW
-'
-        ui '4) P2P STATUS
-'
-        ui '0) BACK
+    mapfile -t groups < <(
+        for dev in $(find_cmps); do
+            [[ -e "/sys/bus/pci/devices/$dev/iommu_group" ]] || continue
+            basename "$(readlink "/sys/bus/pci/devices/$dev/iommu_group")"
+        done | sort -n -u
+    )
 
-Select: '
-        IFS= read -r choice
-        case "$choice" in
-            1) set_p2p_mode enabled; ui 'Restart compute service now? [y/N]: '; IFS= read -r ans; [[ "$ans" =~ ^[Yy]$ ]] && apply_p2p_mode_now; ui '
-Press Enter: '; read -r _ || true ;;
-            2) set_p2p_mode disabled; ui 'Restart compute service now? [y/N]: '; IFS= read -r ans; [[ "$ans" =~ ^[Yy]$ ]] && apply_p2p_mode_now; ui '
-Press Enter: '; read -r _ || true ;;
-            3) apply_p2p_mode_now; ui '
-Press Enter: '; read -r _ || true ;;
-            4) show_p2p_status; ui '
-Press Enter: '; read -r _ || true ;;
-            0) return 0 ;;
-            *) warn 'unknown option'; sleep 1 ;;
-        esac
+    if [[ "${#groups[@]}" -eq 0 ]]; then
+        printf 'no CMP90HX IOMMU groups found
+'
+        return 1
+    fi
+
+    for group in "${groups[@]}"; do
+        type_file="/sys/kernel/iommu_groups/${group}/type"
+        [[ -e "$type_file" ]] || { printf 'group %s has no type file
+' "$group"; continue; }
+
+        before="$(cat "$type_file" 2>/dev/null || true)"
+        printf 'IOMMU group %s before=%s
+' "$group" "${before:-unknown}"
+
+        if [[ "$before" != "identity" ]]; then
+            echo identity > "$type_file" || {
+                printf 'cannot set IOMMU group %s to identity
+' "$group"
+                return 1
+            }
+        fi
+
+        after="$(cat "$type_file" 2>/dev/null || true)"
+        printf 'IOMMU group %s after=%s
+' "$group" "${after:-unknown}"
+        [[ "$after" == "identity" ]] || return 1
     done
+}
+
+unload_nvidia_stack_for_p2p() {
+    local i loaded
+
+    systemctl stop "$COMPUTE_SERVICE" 2>/dev/null || true
+    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k -TERM /dev/nvidia* 2>/dev/null || true
+        sleep 2
+        fuser -k -KILL /dev/nvidia* 2>/dev/null || true
+    fi
+
+    for i in 1 2 3 4 5; do
+        modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        sleep 2
+
+        if ! lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)'; then
+            printf 'nvidia stack unloaded
+'
+            return 0
+        fi
+
+        loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '
+' ' ')"
+        printf 'nvidia stack still loaded after pass %s/5: %s
+' "$i" "${loaded:-unknown}"
+    done
+
+    printf 'failed to unload nvidia stack
+'
+    lsmod | grep '^nvidia' || true
+    return 1
+}
+
+restart_compute_service_for_p2p() {
+    systemctl daemon-reload || true
+    systemctl restart "$COMPUTE_SERVICE" || {
+        printf '
+FAILED: %s restart failed
+' "$COMPUTE_SERVICE"
+        journalctl -u "$COMPUTE_SERVICE" -b -n 180 --no-pager || true
+        return 1
+    }
+}
+
+verify_p2p_enabled_now() {
+    local d g t modpath bad=0
+
+    printf 'P2P mode: %s
+' "$(p2p_mode_value)"
+
+    modpath="$(modinfo -n nvidia 2>/dev/null || true)"
+    printf 'nvidia module path: %s
+' "${modpath:-missing}"
+
+    if [[ "$modpath" != *'/updates/cmpunlocker-90hx-stockflow/'* ]]; then
+        printf 'nvidia is not loaded from patched cmpunlocker-90hx-stockflow path
+'
+        bad=1
+    fi
+
+    printf '
+IOMMU groups:
+'
+    for d in $(find_cmps); do
+        if [[ -e "/sys/bus/pci/devices/$d/iommu_group" ]]; then
+            g="$(basename "$(readlink "/sys/bus/pci/devices/$d/iommu_group")")"
+            t="$(cat "/sys/kernel/iommu_groups/$g/type" 2>/dev/null || echo none)"
+            printf '  %s group=%s type=%s
+' "$d" "$g" "$t"
+            [[ "$t" == "identity" ]] || bad=1
+        else
+            printf '  %s group=none
+' "$d"
+            bad=1
+        fi
+    done
+
+    printf '
+P2P topo read:
+'
+    nvidia-smi topo -p2p r 2>/dev/null || bad=1
+
+    [[ "$bad" == "0" ]]
+}
+
+show_enable_p2p() {
+    STEP_NO=0
+    TOTAL_STEPS=5
+    local failed=0
+
+    clear_left
+    banner
+
+    if [[ "$failed" == "0" ]] && ! run_step 'write P2P enabled runtime' write_p2p_enabled_runtime; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'stop workers and unload nvidia' unload_nvidia_stack_for_p2p; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'set IOMMU identity' set_cmp_iommu_identity_now; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'reload patched driver with P2P' restart_compute_service_for_p2p; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'verify P2P' verify_p2p_enabled_now; then failed=1; fi
+
+    if [[ "$failed" == "0" ]]; then
+        ok 'P2P ENABLED'
+    else
+        warn 'P2P ENABLE FAILED; details are in the right log pane.'
+    fi
+
+    ui '
+Press Enter to return: '
+    [[ -t 0 ]] && read -r _ || true
 }
 
 show_install_cuda() {
@@ -1091,6 +1208,25 @@ BDF="${CMP90_BDF:-$(lspci -Dnn | awk '/10de:220d/ {print $1; exit}')}"
 SPEC=/var/lib/cmpunlocker-rs/rejoin16-next-write.bin
 POKE="${CMP90_POKE:-${SCRIPT_DIR}/bar0poke}"
 
+reload_nvidia_via_handoff() {
+    if [[ -x "${SCRIPT_DIR}/cmp90hx-gen2-handoff.sh" ]]; then
+        CMP90_BDF="$BDF" bash "${SCRIPT_DIR}/cmp90hx-gen2-handoff.sh" || {
+            echo "FATAL: cmp90hx handoff failed"
+            return 1
+        }
+    else
+        modprobe nvidia || {
+            echo "FATAL: modprobe nvidia failed"
+            return 1
+        }
+        sleep 1
+        nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1
+        sleep 1
+        modprobe nvidia_uvm 2>/dev/null || true
+    fi
+}
+
+
 [[ -n "$BDF" ]] || { echo "FATAL: no CMP 90HX (10de:220d) found; set CMP90_BDF"; exit 2; }
 [[ -n "$ADDR" && -n "$VALUE" ]] || { echo "usage: $0 <addr> <value>"; exit 2; }
 
@@ -1158,7 +1294,7 @@ dmesg -C 2>/dev/null || true
 # automatically. The patched build is installed in
 # /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow with a depmod
 # override, so this loads the patched nvidia.ko.
-modprobe nvidia || { echo "FATAL: modprobe nvidia failed"; exit 1; }
+reload_nvidia_via_handoff || exit 1
 sleep 1
 nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1   # trigger RM init
 sleep 1
@@ -1918,7 +2054,6 @@ Usage:
   sudo ./rejoin17.sh
   sudo ./rejoin17.sh --compute-unlock
   sudo ./rejoin17.sh --p2p-enable
-  sudo ./rejoin17.sh --p2p-disable
   sudo ./rejoin17.sh --p2p-status
   sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --verify
@@ -1942,9 +2077,8 @@ EOF_USAGE
 main() {
     case "${1:-}" in
         --compute-unlock|--compute) clean_install_unlock ;;
-        --p2p|--p2p-menu) show_p2p_menu ;;
-        --p2p-enable) set_p2p_mode enabled; write_compute_runtime; systemctl restart "$COMPUTE_SERVICE" ;;
-        --p2p-disable) set_p2p_mode disabled; write_compute_runtime; systemctl restart "$COMPUTE_SERVICE" ;;
+        --p2p|--p2p-menu|--p2p-enable) show_enable_p2p ;;
+        --p2p-disable) fail 'P2P disable was removed; reboot or reinstall compute unlock without enabling P2P if needed'; exit 2 ;;
         --p2p-status) show_p2p_status ;;
         --gen2|--apply-gen2)
             show_apply_gen2
@@ -1969,7 +2103,7 @@ main() {
                 IFS= read -r choice
                 case "$choice" in
                     1) clean_install_unlock ;;
-                    2) show_p2p_menu ;;
+                    2) show_enable_p2p ;;
                     3) show_apply_gen2 ;;
                     4) show_verify ;;
                     5) show_install_cuda ;;
