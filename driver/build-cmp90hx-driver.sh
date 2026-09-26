@@ -21,6 +21,101 @@ NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSIO
 log(){ echo "[cmp90hx-build] $*"; }
 die(){ echo "[cmp90hx-build][FAIL] $*" >&2; exit 1; }
 
+wait_apt_locks() {
+    local max="${APT_LOCK_TIMEOUT:-900}" start now
+    start="$(date +%s)"
+    while true; do
+        command -v fuser >/dev/null 2>&1 || return 0
+        if ! fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; then
+            return 0
+        fi
+        now="$(date +%s)"
+        if (( now - start >= max )); then
+            log "apt/dpkg lock timeout after ${max}s"
+            fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+            return 100
+        fi
+        log "apt/dpkg is locked by another process; waiting... $((now - start))/${max}s"
+        fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock 2>/dev/null || true
+        sleep 5
+    done
+}
+
+apt_get() {
+    wait_apt_locks || return $?
+    DEBIAN_FRONTEND=noninteractive command apt-get "$@"
+}
+
+download_with_retry() {
+    local url="$1" out="$2" tmp attempts delay
+    attempts="${DOWNLOAD_ATTEMPTS:-10}"
+    delay="${DOWNLOAD_RETRY_DELAY:-8}"
+    tmp="${out}.part"
+    mkdir -p "$(dirname "$out")"
+    for ((i=1; i<=attempts; i++)); do
+        log "download attempt ${i}/${attempts}: ${url}"
+        rm -f "$tmp"
+        if curl -fL --connect-timeout 30 --retry 2 --retry-delay 5 --retry-all-errors -o "$tmp" "$url"; then
+            mv -f "$tmp" "$out"
+            return 0
+        fi
+        log "download failed, retry in ${delay}s"
+        sleep "$delay"
+    done
+    rm -f "$tmp"
+    return 1
+}
+
+install_cuda_toolkit_if_missing() {
+    local nvcc_bin os_id os_ver distro arch keyring_deb keyring_url
+
+    nvcc_bin="$(find_nvcc || true)"
+    if [[ -n "$nvcc_bin" ]]; then
+        log "CUDA Toolkit already present: $nvcc_bin"
+        "$nvcc_bin" --version || true
+        return 0
+    fi
+
+    log "CUDA Toolkit not found; installing CUDA Toolkit before patched driver build"
+
+    os_id=""
+    os_ver=""
+    if [[ -r /etc/os-release ]]; then
+        . /etc/os-release
+        os_id="${ID:-}"
+        os_ver="${VERSION_ID:-}"
+    fi
+
+    arch="$(dpkg --print-architecture 2>/dev/null || true)"
+    [[ "$arch" == "amd64" ]] || die "unsupported architecture for CUDA Toolkit repo: ${arch:-unknown}"
+
+    case "${os_id}:${os_ver}" in
+        ubuntu:20.04) distro="ubuntu2004" ;;
+        ubuntu:22.04) distro="ubuntu2204" ;;
+        ubuntu:24.04) distro="ubuntu2404" ;;
+        debian:11) distro="debian11" ;;
+        debian:12) distro="debian12" ;;
+        *) die "unsupported distro for automatic CUDA Toolkit install: ID=${os_id:-unknown} VERSION_ID=${os_ver:-unknown}" ;;
+    esac
+
+    apt_get update
+    apt_get install -y ca-certificates curl wget gnupg lsb-release
+
+    keyring_deb="${CACHE_DIR}/cuda-keyring_1.1-1_${distro}_all.deb"
+    keyring_url="https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+
+    download_with_retry "$keyring_url" "$keyring_deb" || die "failed to download CUDA keyring"
+    dpkg -i "$keyring_deb"
+
+    apt_get update
+    apt_get install -y cuda-toolkit
+
+    nvcc_bin="$(find_nvcc || true)"
+    [[ -n "$nvcc_bin" ]] || die "CUDA Toolkit install finished but nvcc is still missing"
+    log "CUDA Toolkit installed: $nvcc_bin"
+    "$nvcc_bin" --version || true
+}
+
 find_nvcc() {
     if command -v nvcc >/dev/null 2>&1; then
         command -v nvcc
@@ -106,6 +201,8 @@ fi
 [[ -n "$stock_module" ]] || die "stock NVIDIA module ${DRIVER_VERSION} not found after installer"
 log "stock NVIDIA module: $stock_module"
 log "stock NVIDIA module version: $(modinfo -F version "$stock_module" 2>/dev/null || true)"
+install_cuda_toolkit_if_missing
+
 
 for p in \
     "${PATCH_DIR}/0014-6104303-cmp90hx-stockflow-rejoin14-multigpu-state.patch" \

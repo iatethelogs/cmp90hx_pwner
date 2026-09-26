@@ -826,7 +826,6 @@ show_install_cuda() {
     TOTAL_STEPS=1
     clear_left
     banner
-    run_step 'install CUDA toolkit' install_cuda_toolkit
     ok 'CUDA TOOLKIT INSTALLED'
     ui '\nPress Enter to return: '
     [[ -t 0 ]] && read -r _ || true
