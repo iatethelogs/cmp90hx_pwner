@@ -21,11 +21,33 @@ NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSIO
 log(){ echo "[cmp90hx-build] $*"; }
 die(){ echo "[cmp90hx-build][FAIL] $*" >&2; exit 1; }
 
+find_nvcc() {
+    if command -v nvcc >/dev/null 2>&1; then
+        command -v nvcc
+        return 0
+    fi
+    if [[ -x /usr/local/cuda/bin/nvcc ]]; then
+        printf '%s\n' /usr/local/cuda/bin/nvcc
+        return 0
+    fi
+    return 1
+}
+
+require_cuda_toolkit() {
+    local nvcc_bin
+    nvcc_bin="$(find_nvcc || true)"
+    if [[ -z "$nvcc_bin" ]]; then
+        die "CUDA Toolkit not found: nvcc is missing. Open the main menu and press 'Install CUDA Toolkit', then rerun COMPUTE UNLOCK."
+    fi
+    log "CUDA Toolkit found: $nvcc_bin"
+}
+
 [[ "$(id -u)" == "0" ]] || die "run as root"
 [[ -d "/lib/modules/${KREL}/build" ]] || die "kernel headers missing: /lib/modules/${KREL}/build"
 for c in awk curl find gcc install make mkdir modinfo patch sha256sum sort strings tar; do
     command -v "$c" >/dev/null 2>&1 || die "required command missing: $c"
 done
+require_cuda_toolkit
 
 find_stock_nvidia_module() {
     local p ver
