@@ -13,14 +13,14 @@ set -Eeuo pipefail
 PROGRAM_NAME="CMP90HX Pwner"
 REPO_URL="https://github.com/iatethelogs/cmp90hx_pwner"
 DRIVER_VERSION="${DRIVER_VERSION:-610.43.03}"
-PROJECT_REPO="${PROJECT_REPO:-https://github.com/Wh1stle05/cmp90hx.git}"
-PROJECT_DIR="${PROJECT_DIR:-/usr/local/src/cmp90hx-pwner/cmp90hx}"
 PREFIX="${PREFIX:-/opt/cmp90hx-gen2}"
 STATE_DIR="${STATE_DIR:-/var/lib/cmp90hx-pwner}"
 RUNTIME_STATE_DIR="${RUNTIME_STATE_DIR:-/var/lib/cmpunlocker-rs}"
 LOG_DIR="${LOG_DIR:-/var/log}"
 LOG="${LOG:-${LOG_DIR}/cmp90hx-pwner-$(date +%Y%m%d-%H%M%S).log}"
 SELF_PATH="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+SCRIPT_ROOT="$(cd "$(dirname "$SELF_PATH")" && pwd)"
+P2P_MODE_FILE="${P2P_MODE_FILE:-${STATE_DIR}/p2p.mode}"
 AUTO_REBOOT_IF_NOUVEAU="${AUTO_REBOOT_IF_NOUVEAU:-0}"
 PURGE_NVIDIA_PACKAGES="${PURGE_NVIDIA_PACKAGES:-1}"
 KILL_GPU_PROCS="${KILL_GPU_PROCS:-1}"
@@ -29,8 +29,6 @@ COMPUTE_SERVICE="cmp90hx-compute.service"
 BOOT_GATE="${PREFIX}/rejoin17-boot-gate.sh"
 APPLY_SCRIPT="${PREFIX}/rejoin17-apply-all.sh"
 SSH_PROFILE="/etc/profile.d/cmp90hx-pwner-login.sh"
-NVIDIA_RUN_URL="https://download.nvidia.com/XFree86/Linux-x86_64/${DRIVER_VERSION}/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
-NVIDIA_RUN="/var/tmp/NVIDIA-Linux-x86_64-${DRIVER_VERSION}.run"
 
 export LC_ALL=C
 
@@ -187,7 +185,7 @@ run_step() {
 apt_install_base() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates curl wget git tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
+    apt-get install -y ca-certificates curl wget tmux pciutils kmod build-essential dkms linux-headers-"$(uname -r)" python3 python3-minimal initramfs-tools gzip tar make gcc g++
 }
 
 install_cuda_toolkit() {
@@ -393,7 +391,7 @@ purge_old_pwner() {
           /etc/profile.d/cmp90hx-pwner-firstboot.sh \
           /etc/profile.d/cmp90hx-pwner-login.sh 2>/dev/null || true
     rm -f /etc/update-motd.d/99-cmp90hx-pwner 2>/dev/null || true
-    rm -rf "$PREFIX" "$RUNTIME_STATE_DIR" "$STATE_DIR" "$PROJECT_DIR" /usr/local/src/cmp90hx-rejoin17 2>/dev/null || true
+    rm -rf "$PREFIX" "$RUNTIME_STATE_DIR" "$STATE_DIR" /usr/local/src/cmp90hx-rejoin17 2>/dev/null || true
     rm -f /etc/depmod.d/cmp90hx-gen2.conf /etc/depmod.d/*cmp90hx* /etc/depmod.d/*rejoin* /etc/depmod.d/*pwner* 2>/dev/null || true
     rm -f /etc/modprobe.d/cmp90hx-gen2-noauto.conf /etc/modprobe.d/*cmp90hx* /etc/modprobe.d/*rejoin* /etc/modprobe.d/*pwner* 2>/dev/null || true
     sanitize_depmod
@@ -471,81 +469,31 @@ download_with_retry() {
     return 1
 }
 
-git_clone_retry() {
-    local repo="$1" dst="$2" attempts delay
-    attempts="${GIT_ATTEMPTS:-6}"
-    delay="${GIT_RETRY_DELAY:-8}"
-    rm -rf "$dst"
-    for ((i=1; i<=attempts; i++)); do
-        printf 'git clone attempt %s/%s: %s\n' "$i" "$attempts" "$repo"
-        if git clone --depth 1 "$repo" "$dst"; then
-            return 0
-        fi
-        rm -rf "$dst"
-        printf 'git clone failed, retry in %ss\n' "$delay"
-        sleep "$delay"
-    done
-    return 1
-}
 
-install_stock_driver() {
-    mkdir -p "$(dirname "$NVIDIA_RUN")"
-
-    if [[ ! -s "$NVIDIA_RUN" ]]; then
-        download_with_retry "$NVIDIA_RUN_URL" "$NVIDIA_RUN"
-    fi
-
-    chmod +x "$NVIDIA_RUN"
-    bash "$NVIDIA_RUN" \
-        --silent \
-        --accept-license \
-        --no-questions \
-        --no-cc-version-check \
-        --no-nouveau-check
-
-    depmod -a
+require_stock_nvidia_driver() {
+    local cur lic stock_count
+    cur="$(modinfo -F version nvidia 2>/dev/null || true)"
+    [[ "$cur" == "$DRIVER_VERSION" ]] || {
+        printf 'stock NVIDIA module version is %s, expected %s\n' "${cur:-missing}" "$DRIVER_VERSION"
+        printf 'Install matching NVIDIA %s userland/stock module first. This path downloads only NVIDIA kernel source.\n' "$DRIVER_VERSION"
+        return 20
+    }
+    lic="$(modinfo -F license nvidia 2>/dev/null || true)"
+    printf 'stock NVIDIA module version: %s\n' "$cur"
+    printf 'stock NVIDIA module license: %s\n' "${lic:-unknown}"
+    stock_count="$(find "/lib/modules/$(uname -r)" -name nvidia.ko 2>/dev/null | grep -v 'updates/cmpunlocker-90hx-stockflow' | wc -l | tr -d ' ')"
+    [[ "$stock_count" -gt 0 ]] || { printf 'no stock nvidia.ko found outside cmpunlocker path\n'; return 21; }
 }
 
 install_patched_driver() {
-    mkdir -p "$(dirname "$PROJECT_DIR")"
-    git_clone_retry "$PROJECT_REPO" "$PROJECT_DIR"
-    cd "$PROJECT_DIR"
-    # Do not let the upstream installer enable the combined boot action.
-    # Fail if its layout changes instead of guessing which commands to remove.
-    grep -qx '# 7. systemd unit' scripts/install.sh || {
-        printf 'upstream installer layout changed: boot-service section not found\n'
-        return 20
-    }
-    sed -i '/^# 7. systemd unit$/,$d' scripts/install.sh
-    mkdir -p /etc/depmod.d
-    bash scripts/install.sh
-    depmod -a
+    local builder="$SCRIPT_ROOT/driver/build-cmp90hx-driver.sh"
+    [[ -x "$builder" ]] || { printf 'missing local builder: %s
+' "$builder"; return 20; }
+    PREFIX="$PREFIX" DRIVER_VERSION="$DRIVER_VERSION" bash "$builder"
 }
 
-preserve_rejoin_verifiers() {
-    mkdir -p "$PREFIX"
-    local bin check copied=0
-
-    bin="$(find_rejoin_verifier_bin || true)"
-    if [[ -n "$bin" && -x "$bin" ]]; then
-        install -m 0755 "$bin" "$PREFIX/cmpunlocker-rs"
-        printf 'saved built-in verifier: %s -> %s\n' "$bin" "$PREFIX/cmpunlocker-rs"
-        copied=1
-    fi
-
-    check="$(find_rejoin_check_sh || true)"
-    if [[ -n "$check" && -f "$check" ]]; then
-        install -m 0755 "$check" "$PREFIX/check.sh"
-        printf 'saved check.sh: %s -> %s\n' "$check" "$PREFIX/check.sh"
-        copied=1
-    fi
-
-    if [[ "$copied" != "1" ]]; then
-        printf 'warning: no built-in rejoin verifier found during install\n'
-        printf 'verify will fail until cmpunlocker-rs or check.sh is available\n'
-    fi
-}
-
+# No external cmpunlocker-rs/check.sh verifier is required.
+# Verification below is implemented in bash against sysfs, modinfo, nvidia-smi and module markers.
 
 apply_now() {
     [[ -x "$APPLY_SCRIPT" ]] || return 10
@@ -629,70 +577,86 @@ verify_compute_unlock() {
     printf 'compute driver layer present\n'
 }
 
-find_rejoin_verifier_bin() {
-    local p
-    for p in \
-        "$PREFIX/cmpunlocker-rs" \
-        "$PREFIX/bin/cmpunlocker-rs" \
-        "$PROJECT_DIR/cmpunlocker-rs" \
-        "/usr/local/bin/cmpunlocker-rs" \
-        "/usr/bin/cmpunlocker-rs"; do
-        [[ -x "$p" ]] && { printf '%s\n' "$p"; return 0; }
-    done
-
-    find \
-        "$PREFIX" \
-        "$PROJECT_DIR" \
-        /usr/local/src/cmp90hx-pwner \
-        /var/tmp \
-        /tmp \
-        -maxdepth 8 -type f -name cmpunlocker-rs -perm -111 2>/dev/null | head -1
-}
-
-find_rejoin_check_sh() {
-    local p
-    for p in \
-        "$PREFIX/check.sh" \
-        "$PROJECT_DIR/check.sh" \
-        "/usr/local/src/cmp90hx-pwner/cmp90hx/check.sh"; do
-        [[ -f "$p" ]] && { printf '%s\n' "$p"; return 0; }
-    done
-
-    find \
-        "$PREFIX" \
-        "$PROJECT_DIR" \
-        /usr/local/src/cmp90hx-pwner \
-        /var/tmp \
-        /tmp \
-        -maxdepth 8 -type f -name check.sh -path '*cmp*' 2>/dev/null | head -1
-}
-
 verify_rejoin_compute_full() {
-    local bin check rc
+    local cmps cmp expected seen modpath marker_failed=0 smi_failed=0 drv critical
 
     bind_cmps_to_nvidia || return 21
 
-    bin="$(find_rejoin_verifier_bin || true)"
-    if [[ -n "$bin" && -x "$bin" ]]; then
-        printf 'rejoin verifier: %s\n' "$bin"
-        "$bin" compute90hx-v67 verify --all-cmp90hx --expect full
-        return $?
+    mapfile -t cmps < <(find_cmps)
+    expected="${#cmps[@]}"
+    (( expected > 0 )) || { printf 'no CMP 90HX 10de:220d devices found\n'; return 22; }
+
+    modpath="$(modinfo -n nvidia 2>/dev/null || true)"
+    printf 'loaded nvidia module path: %s\n' "${modpath:-missing}"
+    if [[ -z "$modpath" || ! -f "$modpath" ]]; then
+        printf 'loaded nvidia.ko path is missing\n'
+        return 23
     fi
 
-    check="$(find_rejoin_check_sh || true)"
-    if [[ -n "$check" && -f "$check" ]]; then
-        printf 'rejoin check.sh: %s\n' "$check"
-        chmod +x "$check" 2>/dev/null || true
-        ( cd "$(dirname "$check")" && bash "./$(basename "$check")" )
-        rc=$?
-        return "$rc"
+    if [[ "$modpath" != *'/updates/cmpunlocker-90hx-stockflow/'* ]]; then
+        printf 'nvidia.ko is not loaded from cmpunlocker-90hx-stockflow path\n'
+        printf 'expected patched module under /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow\n'
+        return 24
     fi
 
-    printf 'no rejoin built-in verifier found\n'
-    printf 'expected one of:\n'
-    printf '  cmpunlocker-rs compute90hx-v67 verify --all-cmp90hx --expect full\n'
-    printf '  check.sh from cmp90hx/cmpunlocker tree\n'
-    return 20
+    if command -v strings >/dev/null 2>&1; then
+        if ! strings "$modpath" 2>/dev/null | grep -qF 'CMP90_STOCKFLOW_REJOIN16'; then
+            printf 'CMP90_STOCKFLOW_REJOIN16 marker is missing in loaded nvidia.ko\n'
+            marker_failed=1
+        fi
+    else
+        printf 'strings command missing; cannot check CMP90_STOCKFLOW_REJOIN16 marker\n'
+        marker_failed=1
+    fi
+    [[ "$marker_failed" == "0" ]] || return 25
+
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        printf '\nnvidia-smi -L:\n'
+        nvidia-smi -L || smi_failed=1
+        seen="$(nvidia-smi -L 2>/dev/null | grep -c '^GPU ' || true)"
+        printf 'nvidia-smi visible GPUs: %s, CMP PCI devices: %s\n' "$seen" "$expected"
+        if [[ "$seen" -lt "$expected" ]]; then
+            printf 'not all CMP cards are visible to nvidia-smi\n'
+            smi_failed=1
+        fi
+
+        printf '\nGPU summary:\n'
+        nvidia-smi --query-gpu=index,pci.bus_id,name,driver_version,memory.total --format=csv,noheader 2>/dev/null || true
+
+        printf '\nBAR1 report:\n'
+        nvidia-smi -q -d MEMORY 2>/dev/null | grep -A8 -i 'BAR1' || true
+
+        printf '\nP2P topology read capability:\n'
+        nvidia-smi topo -p2p r 2>/dev/null || true
+    else
+        printf 'nvidia-smi missing; cannot verify visible GPUs\n'
+        smi_failed=1
+    fi
+    [[ "$smi_failed" == "0" ]] || return 26
+
+    printf '\nCMP driver binding:\n'
+    for cmp in "${cmps[@]}"; do
+        drv="none"
+        [[ -L "/sys/bus/pci/devices/$cmp/driver" ]] && drv="$(basename "$(readlink -f "/sys/bus/pci/devices/$cmp/driver")")"
+        printf '  %s driver=%s numa=%s speed=%s width=%s\n' \
+            "$cmp" \
+            "$drv" \
+            "$(cat "/sys/bus/pci/devices/$cmp/numa_node" 2>/dev/null || echo unknown)" \
+            "$(cat "/sys/bus/pci/devices/$cmp/current_link_speed" 2>/dev/null || echo unknown)" \
+            "$(cat "/sys/bus/pci/devices/$cmp/current_link_width" 2>/dev/null || echo unknown)"
+        [[ "$drv" == "nvidia" ]] || return 27
+    done
+
+    printf '\nRecent critical NVIDIA kernel messages, if any:\n'
+    critical="$(dmesg 2>/dev/null | grep -Ei 'NVRM|Xid|RmInitAdapter|fallen off the bus' | tail -n 30 || true)"
+    if [[ -n "$critical" ]]; then
+        printf '%s\n' "$critical"
+        printf 'warning: critical-looking NVIDIA messages exist in dmesg; inspect manually if verify otherwise passed\n'
+    else
+        printf 'none found\n'
+    fi
+
+    printf '\nPASS_CMP90HX_REJOIN16_BASH_VERIFY\n'
 }
 
 
@@ -714,6 +678,97 @@ show_verify() {
     [[ -t 0 ]] && read -r _ || true
 }
 
+p2p_mode_value() {
+    cat "$P2P_MODE_FILE" 2>/dev/null || echo disabled
+}
+
+set_p2p_mode() {
+    local mode="$1"
+    mkdir -p "$STATE_DIR"
+    case "$mode" in
+        enabled|disabled) printf '%s
+' "$mode" > "$P2P_MODE_FILE" ;;
+        *) printf 'bad P2P mode: %s
+' "$mode"; return 2 ;;
+    esac
+    chmod 0644 "$P2P_MODE_FILE" 2>/dev/null || true
+    printf 'P2P mode is now: %s
+' "$mode"
+}
+
+show_p2p_status() {
+    local d g
+    printf 'P2P mode file: %s
+' "$P2P_MODE_FILE"
+    printf 'P2P mode: %s
+' "$(p2p_mode_value)"
+    printf '
+IOMMU groups:
+'
+    for d in $(find_cmps); do
+        if [[ -e "/sys/bus/pci/devices/$d/iommu_group" ]]; then
+            g="$(basename "$(readlink "/sys/bus/pci/devices/$d/iommu_group")")"
+            printf '  %s group=%s type=%s
+' "$d" "$g" "$(cat "/sys/kernel/iommu_groups/$g/type" 2>/dev/null || echo none)"
+        else
+            printf '  %s group=none
+' "$d"
+        fi
+    done
+    printf '
+NVIDIA params:
+'
+    cat /proc/driver/nvidia/params 2>/dev/null | grep -Ei 'RegistryDwords|P2P|BAR|Resizable|Dma|Peer|Static|Iomap|Feature' || true
+    printf '
+BAR1:
+'
+    nvidia-smi -q -d MEMORY 2>/dev/null | grep -A8 -i 'BAR1' || true
+    printf '
+P2P topo read:
+'
+    nvidia-smi topo -p2p r 2>/dev/null || true
+}
+
+apply_p2p_mode_now() {
+    write_compute_runtime
+    systemctl restart "$COMPUTE_SERVICE"
+}
+
+show_p2p_menu() {
+    local choice
+    while true; do
+        clear_left
+        banner
+        ui 'Current P2P mode: %s
+
+' "$(p2p_mode_value)"
+        ui '1) ENABLE P2P AT BOOT
+'
+        ui '2) DISABLE P2P AT BOOT
+'
+        ui '3) APPLY CURRENT MODE NOW
+'
+        ui '4) P2P STATUS
+'
+        ui '0) BACK
+
+Select: '
+        IFS= read -r choice
+        case "$choice" in
+            1) set_p2p_mode enabled; ui 'Restart compute service now? [y/N]: '; IFS= read -r ans; [[ "$ans" =~ ^[Yy]$ ]] && apply_p2p_mode_now; ui '
+Press Enter: '; read -r _ || true ;;
+            2) set_p2p_mode disabled; ui 'Restart compute service now? [y/N]: '; IFS= read -r ans; [[ "$ans" =~ ^[Yy]$ ]] && apply_p2p_mode_now; ui '
+Press Enter: '; read -r _ || true ;;
+            3) apply_p2p_mode_now; ui '
+Press Enter: '; read -r _ || true ;;
+            4) show_p2p_status; ui '
+Press Enter: '; read -r _ || true ;;
+            0) return 0 ;;
+            *) warn 'unknown option'; sleep 1 ;;
+        esac
+    done
+}
+
 show_install_cuda() {
     STEP_NO=0
     TOTAL_STEPS=1
@@ -732,14 +787,25 @@ BOOT_BEEP_SERVICE="${BOOT_BEEP_SERVICE:-boot-beep.service}"
 menu() {
     clear_left
     banner 1
-    ui '1) COMPUTE UNLOCK\n'
-    ui '2) PCIe GEN2\n'
-    ui '3) VERIFY\n'
-    ui '4) INSTALL CUDA TOOLKIT\n'
-    ui '5) INSTALL 4-BEEP AT START\n'
-    ui '6) INSTALL FAN/GPU HELPERS\n'
-    ui '7) UNINSTALL\n'
-    ui '0) EXIT\n\nSelect: '
+    ui '1) COMPUTE UNLOCK
+'
+    ui '2) P2P MODE
+'
+    ui '3) PCIe GEN2
+'
+    ui '4) VERIFY
+'
+    ui '5) INSTALL CUDA TOOLKIT
+'
+    ui '6) INSTALL 4-BEEP AT START
+'
+    ui '7) INSTALL FAN/GPU HELPERS
+'
+    ui '8) UNINSTALL
+'
+    ui '0) EXIT
+
+Select: '
 }
 
 remove_obsolete_boot_hook() {
@@ -763,41 +829,41 @@ remove_obsolete_boot_hook() {
 }
 
 write_compute_runtime() {
-    mkdir -p "$PREFIX"
+    mkdir -p "$PREFIX" "$STATE_DIR"
+    [[ -f "$P2P_MODE_FILE" ]] || printf 'disabled
+' > "$P2P_MODE_FILE"
+
     cat > "$PREFIX/cmp90hx-gen2-handoff.sh" <<'EOF_COMPUTE_HANDOFF'
 #!/usr/bin/env bash
-# Make the PATCHED nvidia module the active one, safely.
+# Load CMP90HX patched compute driver. Optional P2P mode is controlled by:
+#   /var/lib/cmp90hx-pwner/p2p.mode = enabled|disabled
 #
-# The patched module must not be the *first* nvidia driver load of a power
-# cycle. Its V67 chain replaces the signature memdesc that a plain *stock* GSP
-# boot leaves behind, so loading it first fails:
-#
-#   NVRM: GPU0 nvCheckFailedNoLog: Check failed:
-#         s_cmp90PcStockSignatureMemdescByGpu[cmp90GpuSlot] == NULL @ kernel_gsp.c:5986
-#   NVRM: GPU 0000:03:00.0: RmInitAdapter failed! (0x62:0x40:2119)
-#
-# and the half-booted GSP leaves WPR2 up, after which every retry in that same
-# boot also fails ("_kgspBootGspRm: unexpected WPR2 already up ... the GPU is
-# likely in a bad state and may need to be reset"). Only a reboot clears it,
-# so a bad first load costs a reboot and the unlock never happens.
-#
-# Fix: bring the card up with the stock module first, then hand it over to the
-# patched module. Pair with /etc/modprobe.d/cmp90hx-gen2-noauto.conf so udev
-# does not auto-load the patched module before this runs.
+# P2P mode is intentionally runtime-only: Gen2 is still manual and is not
+# applied from this boot path.
 set -uo pipefail
 
 KREL="$(uname -r)"
 PATCHED_DIR="/usr/lib/modules/${KREL}/updates/cmpunlocker-90hx-stockflow"
 PATCHED_SRCV="$(modinfo -F srcversion "${PATCHED_DIR}/nvidia.ko" 2>/dev/null || true)"
+STATE_DIR="${STATE_DIR:-/var/lib/cmp90hx-pwner}"
+P2P_MODE_FILE="${P2P_MODE_FILE:-${STATE_DIR}/p2p.mode}"
 UNLOAD=(nvidia_drm nvidia_modeset nvidia_uvm nvidia_peermem nvidia)
+P2P_REG='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=0;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
 
 log() { echo "cmp90hx-handoff: $*"; }
 loaded_srcv() { cat /sys/module/nvidia/srcversion 2>/dev/null || true; }
 gpu_ok() { nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; }
 
-wait_gpu() {  # <tries> (2 s each)
+p2p_enabled() {
+    [[ "$(cat "$P2P_MODE_FILE" 2>/dev/null || echo disabled)" == "enabled" ]]
+}
+
+wait_gpu() {
     local i
-    for i in $(seq 1 "${1:-30}"); do gpu_ok && return 0; sleep 2; done
+    for i in $(seq 1 "${1:-30}"); do
+        gpu_ok && return 0
+        sleep 2
+    done
     return 1
 }
 
@@ -805,7 +871,7 @@ unload_all() {
     modprobe -r "${UNLOAD[@]}" 2>/dev/null || { sleep 2; modprobe -r "${UNLOAD[@]}" 2>/dev/null; }
 }
 
-find_stock() {  # echo path of an unpatched nvidia.ko, if any
+find_stock() {
     local p
     for p in "/usr/lib/modules/${KREL}/updates/dkms/nvidia.ko" \
              "/lib/modules/${KREL}/updates/dkms/nvidia.ko"; do
@@ -815,13 +881,84 @@ find_stock() {  # echo path of an unpatched nvidia.ko, if any
     [[ -n "$p" ]] && echo "$p"
 }
 
-[[ -n "$PATCHED_SRCV" ]] || { log "FATAL: patched nvidia.ko missing at $PATCHED_DIR"; exit 1; }
-[[ -c /dev/nvidiactl || -d /sys/module/nvidia ]] || true
+cmp_gpus() {
+    for d in /sys/bus/pci/devices/*; do
+        [[ -f "$d/vendor" && -f "$d/device" ]] || continue
+        [[ "$(cat "$d/vendor")" == "0x10de" && "$(cat "$d/device")" == "0x220d" ]] && basename "$d"
+    done | sort
+}
 
-# Fast path: patched module already active with a live GPU.
-if [[ "$(loaded_srcv)" == "$PATCHED_SRCV" ]] && gpu_ok; then
-    log "patched module already active (srcversion $PATCHED_SRCV)"
-    exit 0
+set_iommu_identity() {
+    local dev group type_file before after groups=()
+    mapfile -t groups < <(
+        for dev in $(cmp_gpus); do
+            [[ -e "/sys/bus/pci/devices/$dev/iommu_group" ]] || continue
+            basename "$(readlink "/sys/bus/pci/devices/$dev/iommu_group")"
+        done | sort -n -u
+    )
+
+    if [[ "${#groups[@]}" -eq 0 ]]; then
+        log "no CMP90HX IOMMU groups found; skip identity"
+        return 0
+    fi
+
+    for group in "${groups[@]}"; do
+        type_file="/sys/kernel/iommu_groups/${group}/type"
+        [[ -e "$type_file" ]] || { log "group $group has no type file"; continue; }
+        before="$(cat "$type_file" 2>/dev/null || true)"
+        log "IOMMU group $group before=$before"
+        if [[ "$before" != "identity" ]]; then
+            echo identity > "$type_file" || { log "FATAL: cannot set IOMMU group $group to identity"; return 1; }
+        fi
+        after="$(cat "$type_file" 2>/dev/null || true)"
+        log "IOMMU group $group after=$after"
+        [[ "$after" == "identity" ]] || { log "FATAL: IOMMU group $group is not identity"; return 1; }
+    done
+}
+
+disable_acs_redirects() {
+    local dev old new
+    command -v lspci >/dev/null 2>&1 || return 0
+    command -v setpci >/dev/null 2>&1 || return 0
+    for path in /sys/bus/pci/devices/*; do
+        dev="$(basename "$path")"
+        lspci -vv -s "$dev" 2>/dev/null | grep -q ACSCtl || continue
+        old="$(setpci -s "$dev" ECAP_ACS+0x6.w 2>/dev/null || true)"
+        [[ -z "$old" ]] && continue
+        new="$(printf '%04x' $(( 0x$old & ~0x000c )))"
+        if [[ "$new" != "$old" ]]; then
+            log "$dev ACSCtl old=$old new=$new"
+            setpci -s "$dev" ECAP_ACS+0x6.w="$new" 2>/dev/null || true
+        fi
+    done
+}
+
+load_patched_final() {
+    modprobe ecc 2>/dev/null || true
+    modprobe ecdh_generic 2>/dev/null || true
+    if p2p_enabled; then
+        log "loading patched module with P2P RegistryDwords"
+        insmod "$PATCHED_DIR/nvidia.ko" \
+            NVreg_EnableResizableBar=1 \
+            NVreg_DmaRemapPeerMmio=0 \
+            NVreg_RegistryDwords="$P2P_REG" || return 1
+        [[ -f "$PATCHED_DIR/nvidia-uvm.ko" ]] && insmod "$PATCHED_DIR/nvidia-uvm.ko" 2>/dev/null || modprobe nvidia_uvm 2>/dev/null || true
+    else
+        log "loading patched module without P2P RegistryDwords"
+        modprobe nvidia || return 1
+        modprobe nvidia_uvm 2>/dev/null || true
+    fi
+}
+
+[[ -n "$PATCHED_SRCV" ]] || { log "FATAL: patched nvidia.ko missing at $PATCHED_DIR"; exit 1; }
+
+if p2p_enabled; then
+    log "P2P mode: enabled"
+    unload_all || true
+    set_iommu_identity || exit 1
+    disable_acs_redirects || true
+else
+    log "P2P mode: disabled"
 fi
 
 STOCK="$(find_stock)"
@@ -829,6 +966,7 @@ if [[ -n "$STOCK" ]]; then
     log "priming GPU with stock module: $STOCK"
     unload_all
     modprobe ecc 2>/dev/null || true
+    modprobe ecdh_generic 2>/dev/null || true
     insmod "$STOCK" 2>/dev/null || log "WARNING: insmod stock module failed"
     if wait_gpu 20; then
         log "stock module brought the GPU up"
@@ -842,13 +980,12 @@ fi
 log "handing over to the patched module"
 unload_all
 sleep 2
-modprobe nvidia || { log "FATAL: modprobe nvidia failed"; exit 1; }
+load_patched_final || { log "FATAL: patched module load failed"; exit 1; }
 loaded="$(loaded_srcv)"
 if [[ "$loaded" != "$PATCHED_SRCV" ]]; then
     log "WARNING: loaded srcversion '${loaded:-none}' != patched '$PATCHED_SRCV'"
 fi
 if wait_gpu 30; then
-    modprobe nvidia_uvm 2>/dev/null || true
     log "patched module active (srcversion ${loaded:-?})"
     exit 0
 fi
@@ -856,6 +993,7 @@ log "FATAL: GPU did not come up on the patched module"
 exit 1
 EOF_COMPUTE_HANDOFF
     chmod 0755 "$PREFIX/cmp90hx-gen2-handoff.sh"
+
     cat > "/etc/systemd/system/$COMPUTE_SERVICE" <<EOF_COMPUTE_UNIT
 [Unit]
 Description=CMP90HX compute driver initialization
@@ -866,7 +1004,6 @@ ConditionPathExists=$PREFIX/cmp90hx-gen2-handoff.sh
 
 [Service]
 Type=oneshot
-# A previous interrupted manual write must not be replayed during compute init.
 ExecStartPre=/usr/bin/rm -f /var/lib/cmpunlocker-rs/rejoin16-next-write.bin
 ExecStart=/bin/bash $PREFIX/cmp90hx-gen2-handoff.sh
 RemainAfterExit=yes
@@ -1520,22 +1657,19 @@ EOF_APPLY
 
 clean_install_unlock() {
     STEP_NO=0
-    TOTAL_STEPS=14
+    TOTAL_STEPS=11
     clear_left
     banner
     run_step 'backup' backup_state
     run_step 'stop GPU users' stop_gpu_users
     run_step 'remove previous pwner install' purge_old_pwner
-    run_step 'remove previous NVIDIA driver' nvidia_uninstall_best_effort
     run_step 'install dependencies' apt_install_base
     run_step 'block nouveau' blacklist_nouveau
-    run_step 'install stock NVIDIA driver' install_stock_driver
-    run_step 'install patched driver' install_patched_driver
+    run_step 'check stock NVIDIA driver' require_stock_nvidia_driver
+    run_step 'build/install patched driver' install_patched_driver
     run_step 'remove obsolete boot hook' remove_obsolete_boot_hook
     run_step 'install compute startup' write_compute_runtime
     run_step 'activate patched compute driver' activate_compute_driver
-    run_step 'preserve compute verifier' preserve_rejoin_verifiers
-    run_step 'verify compute driver' verify_compute_unlock
     run_step 'verify compute unlock' verify_rejoin_compute_full
     ok 'COMPUTE UNLOCK COMPLETE'
     ui 'Press Enter to return: '
@@ -1694,6 +1828,9 @@ $REPO_URL
 Usage:
   sudo ./rejoin17.sh
   sudo ./rejoin17.sh --compute-unlock
+  sudo ./rejoin17.sh --p2p-enable
+  sudo ./rejoin17.sh --p2p-disable
+  sudo ./rejoin17.sh --p2p-status
   sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
@@ -1716,6 +1853,10 @@ EOF_USAGE
 main() {
     case "${1:-}" in
         --compute-unlock|--compute) clean_install_unlock ;;
+        --p2p|--p2p-menu) show_p2p_menu ;;
+        --p2p-enable) set_p2p_mode enabled; write_compute_runtime; systemctl restart "$COMPUTE_SERVICE" ;;
+        --p2p-disable) set_p2p_mode disabled; write_compute_runtime; systemctl restart "$COMPUTE_SERVICE" ;;
+        --p2p-status) show_p2p_status ;;
         --gen2|--apply-gen2)
             show_apply_gen2
             # A command-line Gen2 action in the split UI also returns to its menu.
@@ -1739,12 +1880,13 @@ main() {
                 IFS= read -r choice
                 case "$choice" in
                     1) clean_install_unlock ;;
-                    2) show_apply_gen2 ;;
-                    3) show_verify ;;
-                    4) show_install_cuda ;;
-                    5) show_install_boot_beep ;;
-                    6) show_install_helpers ;;
-                    7)
+                    2) show_p2p_menu ;;
+                    3) show_apply_gen2 ;;
+                    4) show_verify ;;
+                    5) show_install_cuda ;;
+                    6) show_install_boot_beep ;;
+                    7) show_install_helpers ;;
+                    8)
                         ui 'Type UNINSTALL to remove everything: '
                         IFS= read -r confirm
                         [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'

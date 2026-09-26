@@ -13,7 +13,7 @@
 
 ```
 
-Инструмент для CMP 90HX с двумя независимыми действиями: установка compute unlock и ручное включение PCIe Gen2.
+Инструмент для CMP 90HX с тремя независимыми действиями: установка compute unlock, опциональный P2P-режим и ручное включение PCIe Gen2.
 
 ## Совместимость
 
@@ -29,12 +29,13 @@
 
 ```text
 1) COMPUTE UNLOCK
-2) PCIe GEN2
-3) VERIFY
-4) INSTALL CUDA TOOLKIT
-5) INSTALL 4-BEEP AT START
-6) INSTALL FAN/GPU HELPERS
-7) UNINSTALL
+2) P2P MODE
+3) PCIe GEN2
+4) VERIFY
+5) INSTALL CUDA TOOLKIT
+6) INSTALL 4-BEEP AT START
+7) INSTALL FAN/GPU HELPERS
+8) UNINSTALL
 0) EXIT
 ```
 ![mainmenu](images/menu.jpg)
@@ -42,7 +43,9 @@
 
 ### COMPUTE UNLOCK
 
-Устанавливает NVIDIA 610.43.03, активирует патченный драйвер и проверяет снятие вычислительных ограничений.
+Собирает и активирует патченный NVIDIA kernel module из локально завендоренных патчей `0014+0015+0016+0017`. Внешние репозитории во время установки больше не клонируются: установщик скачивает только `NVIDIA-kernel-module-source-610.43.03.tar.xz`.
+
+Полный NVIDIA userland/stock driver `610.43.03` должен быть уже установлен до запуска `COMPUTE UNLOCK`. Это нужно для `nvidia-smi`, `libcuda`, NVML и для stock-prime этапа перед загрузкой патченного модуля.
 
 При первом запуске скрипт блокирует `nouveau`. Если `nouveau` уже был загружен и не смог выгрузиться, Compute Unlock может завершиться сообщением:
 
@@ -51,6 +54,14 @@
 Это ожидаемое поведение. Перезагрузите сервер, снова запустите `cmp90hxpwner.sh` и повторите `COMPUTE UNLOCK`. После перезагрузки блокировка `nouveau` уже будет действовать.
 
 
+
+### P2P MODE
+
+Опционально включает прямой обмен GPU↔GPU. Режим хранится в `/var/lib/cmp90hx-pwner/p2p.mode`.
+
+При `enabled` системный compute service до загрузки NVIDIA переводит IOMMU-группы CMP 90HX в `identity`, отключает ACS redirects где возможно, делает stock-prime, затем грузит патченный драйвер с P2P `RegistryDwords`. По умолчанию используется mailbox path: `RMPcieP2PType=0`.
+
+При `disabled` compute service грузит патченный драйвер без P2P `RegistryDwords` и не трогает IOMMU identity.
 
 ### PCIe GEN2
 
@@ -92,8 +103,9 @@ sudo ./cmp90hxpwner.sh
 
 ```text
 1) COMPUTE UNLOCK - выполнить один раз
-2) PCIe GEN2 - включить Gen2
-3) VERIFY - проверить Compute Unlock и PCIe link
+2) P2P MODE - включить или выключить P2P-профиль
+3) PCIe GEN2 - включить Gen2 вручную
+4) VERIFY - проверить Compute Unlock и PCIe link
 ```
 
 ![PCIEGEN2](images/pcie.jpg)
@@ -143,7 +155,7 @@ gpu-idle - Сбрасывает lock частоты ядра и фиксируе
 
 # English
 
-A tool for CMP 90HX with two independent actions: applying the compute unlock and manually enabling PCIe Gen2.
+A tool for CMP 90HX with three independent actions: applying the compute unlock, optional P2P mode, and manually enabling PCIe Gen2.
 
 ## Compatibility
 
@@ -159,12 +171,13 @@ A tool for CMP 90HX with two independent actions: applying the compute unlock an
 
 ```text
 1) COMPUTE UNLOCK
-2) PCIe GEN2
-3) VERIFY
-4) INSTALL CUDA TOOLKIT
-5) INSTALL 4-BEEP AT START
-6) INSTALL FAN/GPU HELPERS
-7) UNINSTALL
+2) P2P MODE
+3) PCIe GEN2
+4) VERIFY
+5) INSTALL CUDA TOOLKIT
+6) INSTALL 4-BEEP AT START
+7) INSTALL FAN/GPU HELPERS
+8) UNINSTALL
 0) EXIT
 ```
 
@@ -172,7 +185,9 @@ A tool for CMP 90HX with two independent actions: applying the compute unlock an
 
 ### COMPUTE UNLOCK
 
-Installs NVIDIA 610.43.03, activates the patched driver, and verifies that the compute restrictions have been removed.
+Builds and activates the patched NVIDIA kernel module from locally vendored patches `0014+0015+0016+0017`. The installer no longer clones external repositories during setup; it downloads only `NVIDIA-kernel-module-source-610.43.03.tar.xz`.
+
+The full NVIDIA 610.43.03 userland/stock driver must already be installed before running `COMPUTE UNLOCK`. It is required for `nvidia-smi`, `libcuda`, NVML, and the stock-prime stage before the patched module is loaded.
 
 On the first run, the script blocks `nouveau`. If `nouveau` was already loaded and could not be unloaded, Compute Unlock may stop with:
 
@@ -180,6 +195,14 @@ On the first run, the script blocks `nouveau`. If `nouveau` was already loaded a
 
 This is expected. Reboot the server, run `cmp90hxpwner.sh` again, and repeat `COMPUTE UNLOCK`. After the reboot, the `nouveau` blacklist will already be active.
 
+
+### P2P MODE
+
+Optionally enables direct GPU↔GPU transfers. The selected mode is stored in `/var/lib/cmp90hx-pwner/p2p.mode`.
+
+When set to `enabled`, the systemd compute service switches CMP 90HX IOMMU groups to `identity`, disables ACS redirects where possible, runs the stock-prime stage, then loads the patched driver with P2P `RegistryDwords`. The default transport is the mailbox path: `RMPcieP2PType=0`.
+
+When set to `disabled`, the compute service loads the patched driver without P2P `RegistryDwords` and does not touch IOMMU identity.
 
 ### PCIe GEN2
 
