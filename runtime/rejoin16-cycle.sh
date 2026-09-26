@@ -19,22 +19,15 @@ DEFAULT_POKE="${SCRIPT_DIR}/bar0poke"
 [[ -x "$DEFAULT_POKE" ]] || DEFAULT_POKE="/opt/cmp90hx-gen2/bar0poke"
 POKE="${CMP90_POKE:-$DEFAULT_POKE}"
 
-reload_nvidia_via_handoff() {
-    if [[ -x "${SCRIPT_DIR}/cmp90hx-compute-handoff.sh" ]]; then
-        CMP90_BDF="$BDF" CMP90HX_ASSUME_NVIDIA_UNLOADED=1 bash "${SCRIPT_DIR}/cmp90hx-compute-handoff.sh" || {
-            echo "FATAL: cmp90hx handoff failed"
-            return 1
-        }
-    else
-        modprobe nvidia || {
-            echo "FATAL: modprobe nvidia failed"
-            return 1
-        }
-        sleep 1
-        nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1
-        sleep 1
-        modprobe nvidia_uvm 2>/dev/null || true
-    fi
+reload_nvidia_for_rejoin16() {
+    modprobe nvidia || {
+        echo "FATAL: modprobe nvidia failed"
+        return 1
+    }
+    sleep 1
+    nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1
+    sleep 1
+    modprobe nvidia_uvm 2>/dev/null || true
 }
 
 
@@ -105,7 +98,7 @@ dmesg -C 2>/dev/null || true
 # automatically. The patched build is installed in
 # /usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow with a depmod
 # override, so this loads the patched nvidia.ko.
-reload_nvidia_via_handoff || exit 1
+reload_nvidia_for_rejoin16 || exit 1
 sleep 1
 nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1   # trigger RM init
 sleep 1

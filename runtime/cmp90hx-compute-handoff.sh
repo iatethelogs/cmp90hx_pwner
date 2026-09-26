@@ -135,6 +135,12 @@ load_patched_final() {
 
 [[ -n "$PATCHED_SRCV" ]] || { log "FATAL: patched nvidia.ko missing at $PATCHED_DIR"; exit 1; }
 
+# Fast path: patched module already active with a live GPU.
+if [[ "$(loaded_srcv)" == "$PATCHED_SRCV" ]] && gpu_ok; then
+    log "patched module already active (srcversion $PATCHED_SRCV)"
+    exit 0
+fi
+
 log "P2P mode: manual-only; compute handoff loads without P2P RegistryDwords"
 
 STOCK="$(find_stock)"
