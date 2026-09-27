@@ -70,9 +70,20 @@ launch_tui() {
         printf 'export CMP90HX_TUI_CHILD=1\n'
         printf 'export FORCE_COLOR=1\n'
         printf 'export LOG=%q\n' "$LOG"
-        printf 'exec bash %q' "$SELF_PATH"
+        printf 'args_count=%q\n' "$#"
+        printf 'bash %q' "$SELF_PATH"
         for a in "$@"; do printf ' %q' "$a"; done
         printf '\n'
+        printf 'rc=$?\n'
+        printf 'if (( rc != 0 )); then\n'
+        printf '  echo; echo "CMP90HX Pwner command failed with rc=$rc. Returning to main menu. See the right log pane."\n'
+        printf '  sleep 2\n'
+        printf '  exec bash %q\n' "$SELF_PATH"
+        printf 'fi\n'
+        printf 'if (( args_count > 0 )); then\n'
+        printf '  exec bash %q\n' "$SELF_PATH"
+        printf 'fi\n'
+        printf 'exit 0\n'
     } > "$runner"
 
     {
@@ -698,12 +709,13 @@ verify_rejoin_compute_full() {
 
 show_verify() {
     STEP_NO=0
-    TOTAL_STEPS=3
+    TOTAL_STEPS=4
     local failed=0
     clear_left
     banner
     if run_step 'compute unlock' verify_compute_unlock; then :; else failed=1; fi
     if run_step 'rejoin compute full' verify_rejoin_compute_full; then :; else failed=1; fi
+    if run_step 'P2P runtime status' verify_p2p_runtime_status; then :; else failed=1; fi
     if run_step 'Gen2 link' verify_links; then :; else failed=1; fi
     if [[ "$failed" == "0" ]]; then
         ok 'VERIFY COMPLETE'
@@ -713,6 +725,221 @@ show_verify() {
     ui '\nPress Enter to return: '
     [[ -t 0 ]] && read -r _ || true
 }
+
+set_cmp_iommu_identity_now() {
+    local dev group type_file before after groups=()
+
+    mapfile -t groups < <(
+        for dev in $(find_cmps); do
+            [[ -e "/sys/bus/pci/devices/$dev/iommu_group" ]] || continue
+            basename "$(readlink "/sys/bus/pci/devices/$dev/iommu_group")"
+        done | sort -n -u
+    )
+
+    [[ "${#groups[@]}" -gt 0 ]] || { printf 'no CMP90HX IOMMU groups found\n'; return 1; }
+
+    for group in "${groups[@]}"; do
+        type_file="/sys/kernel/iommu_groups/${group}/type"
+        [[ -e "$type_file" ]] || { printf 'group %s has no type file\n' "$group"; continue; }
+
+        before="$(cat "$type_file" 2>/dev/null || true)"
+        printf 'IOMMU group %s before=%s\n' "$group" "${before:-unknown}"
+
+        if [[ "$before" != "identity" ]]; then
+            echo identity > "$type_file" || {
+                printf 'cannot set IOMMU group %s to identity\n' "$group"
+                return 1
+            }
+        fi
+
+        after="$(cat "$type_file" 2>/dev/null || true)"
+        printf 'IOMMU group %s after=%s\n' "$group" "${after:-unknown}"
+        [[ "$after" == "identity" ]] || return 1
+    done
+}
+
+disable_acs_redirects_now() {
+    local dev old new path
+    command -v lspci >/dev/null 2>&1 || return 0
+    command -v setpci >/dev/null 2>&1 || return 0
+
+    for path in /sys/bus/pci/devices/*; do
+        dev="$(basename "$path")"
+        lspci -vv -s "$dev" 2>/dev/null | grep -q ACSCtl || continue
+
+        old="$(setpci -s "$dev" ECAP_ACS+0x6.w 2>/dev/null || true)"
+        [[ -z "$old" ]] && continue
+
+        new="$(printf '%04x' $(( 0x$old & ~0x000c )))"
+        if [[ "$new" != "$old" ]]; then
+            printf '%s ACSCtl old=%s new=%s\n' "$dev" "$old" "$new"
+            setpci -s "$dev" ECAP_ACS+0x6.w="$new" 2>/dev/null || true
+        fi
+    done
+}
+
+nvidia_stack_loaded_now() {
+    lsmod | awk '{print $1}' | grep -Eq '^nvidia($|_)|^nvidia-vgpu-vfio$|^nvidia_vgpu_vfio$'
+}
+
+unload_nvidia_stack_for_p2p() {
+    local i loaded
+
+    systemctl stop "$COMPUTE_SERVICE" 2>/dev/null || true
+    systemctl stop nvidia-persistenced ollama llama open-webui librechat comfyui docker containerd 2>/dev/null || true
+
+    if ls /dev/nvidia* >/dev/null 2>&1; then
+        fuser -k -TERM /dev/nvidia* >/dev/null 2>&1 || true
+        sleep 2
+        fuser -k -KILL /dev/nvidia* >/dev/null 2>&1 || true
+    fi
+
+    for i in 1 2 3 4 5; do
+        modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        modprobe -r nvidia-vgpu-vfio nvidia_vgpu_vfio nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia 2>/dev/null || true
+        rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia_peermem nvidia_vgpu_vfio nvidia 2>/dev/null || true
+        sleep 2
+
+        if ! nvidia_stack_loaded_now; then
+            printf 'nvidia stack unloaded\n'
+            return 0
+        fi
+
+        loaded="$(lsmod | awk '/^nvidia/ {print $1}' | tr '\n' ' ')"
+        printf 'nvidia stack still loaded after pass %s/5: %s\n' "$i" "${loaded:-unknown}"
+    done
+
+    printf 'failed to unload nvidia stack\n'
+    lsmod | grep '^nvidia' || true
+    return 1
+}
+
+wait_gpu_for_p2p() {
+    local i max="${1:-30}"
+    for i in $(seq 1 "$max"); do
+        nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 && return 0
+        sleep 2
+    done
+    return 1
+}
+
+load_patched_driver_once_with_p2p() {
+    local krel patched_dir patched_srcv loaded p2p_reg
+
+    krel="$(uname -r)"
+    patched_dir="/usr/lib/modules/${krel}/updates/cmpunlocker-90hx-stockflow"
+    patched_srcv="$(modinfo -F srcversion "${patched_dir}/nvidia.ko" 2>/dev/null || true)"
+    p2p_reg='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=0;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
+
+    [[ -f "${patched_dir}/nvidia.ko" ]] || { printf 'patched nvidia.ko missing: %s\n' "${patched_dir}/nvidia.ko"; return 1; }
+    [[ -n "$patched_srcv" ]] || { printf 'patched nvidia.ko srcversion missing\n'; return 1; }
+
+    if nvidia_stack_loaded_now; then
+        printf 'nvidia stack is still loaded before P2P insmod\n'
+        lsmod | grep '^nvidia' || true
+        return 1
+    fi
+
+    printf 'loading patched nvidia.ko once with P2P RegistryDwords\n'
+
+    modprobe ecc 2>/dev/null || true
+    modprobe ecdh_generic 2>/dev/null || true
+
+    insmod "${patched_dir}/nvidia.ko" \
+        NVreg_EnableResizableBar=1 \
+        NVreg_DmaRemapPeerMmio=0 \
+        NVreg_RegistryDwords="$p2p_reg" || return 1
+
+    if [[ -f "${patched_dir}/nvidia-uvm.ko" ]]; then
+        insmod "${patched_dir}/nvidia-uvm.ko" 2>/dev/null || modprobe nvidia_uvm 2>/dev/null || true
+    else
+        modprobe nvidia_uvm 2>/dev/null || true
+    fi
+
+    loaded="$(cat /sys/module/nvidia/srcversion 2>/dev/null || true)"
+    printf 'loaded nvidia srcversion: %s\n' "${loaded:-none}"
+    printf 'patched nvidia srcversion: %s\n' "$patched_srcv"
+
+    [[ "$loaded" == "$patched_srcv" ]] || return 1
+    wait_gpu_for_p2p 30 || { printf 'GPU did not come up after patched P2P load\n'; return 1; }
+
+    printf 'patched P2P module active\n'
+}
+
+verify_p2p_runtime_strict() {
+    local d g t modpath bad=0 topo_r topo_w
+
+    modpath="$(modinfo -n nvidia 2>/dev/null || true)"
+    printf 'nvidia module path: %s\n' "${modpath:-missing}"
+
+    [[ "$modpath" == *'/updates/cmpunlocker-90hx-stockflow/'* ]] || {
+        printf 'nvidia is not resolved from patched cmpunlocker-90hx-stockflow path\n'
+        bad=1
+    }
+
+    printf '\nNVIDIA params:\n'
+    cat /proc/driver/nvidia/params 2>/dev/null | grep -Ei 'RegistryDwords|ForceP2P|CLForceP2P|P2P|BAR|Resizable|Dma|Peer|Static|Iomap|Feature' || true
+
+    printf '\nIOMMU groups:\n'
+    for d in $(find_cmps); do
+        if [[ -e "/sys/bus/pci/devices/$d/iommu_group" ]]; then
+            g="$(basename "$(readlink "/sys/bus/pci/devices/$d/iommu_group")")"
+            t="$(cat "/sys/kernel/iommu_groups/$g/type" 2>/dev/null || echo none)"
+            printf '  %s group=%s type=%s\n' "$d" "$g" "$t"
+            [[ "$t" == "identity" ]] || bad=1
+        else
+            printf '  %s group=none\n' "$d"
+            bad=1
+        fi
+    done
+
+    printf '\nP2P topo read:\n'
+    topo_r="$(nvidia-smi topo -p2p r 2>&1)" || bad=1
+    printf '%s\n' "$topo_r"
+    printf '%s\n' "$topo_r" | grep -q 'OK' || bad=1
+
+    printf '\nP2P topo write:\n'
+    topo_w="$(nvidia-smi topo -p2p w 2>&1)" || bad=1
+    printf '%s\n' "$topo_w"
+    printf '%s\n' "$topo_w" | grep -q 'OK' || bad=1
+
+    [[ "$bad" == "0" ]]
+}
+
+verify_p2p_runtime_status() {
+    verify_p2p_runtime_strict || true
+    return 0
+}
+
+show_p2p_status() {
+    verify_p2p_runtime_status
+}
+
+show_enable_p2p() {
+    STEP_NO=0
+    TOTAL_STEPS=5
+    local failed=0
+
+    clear_left
+    banner
+
+    if [[ "$failed" == "0" ]] && ! run_step 'stop workers and unload nvidia' unload_nvidia_stack_for_p2p; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'set IOMMU identity' set_cmp_iommu_identity_now; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'disable ACS redirects' disable_acs_redirects_now; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'load patched driver with P2P' load_patched_driver_once_with_p2p; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'verify P2P runtime' verify_p2p_runtime_strict; then failed=1; fi
+
+    if [[ "$failed" == "0" ]]; then
+        ok 'P2P ENABLED FOR CURRENT DRIVER SESSION'
+        ui '\nP2P is not written to boot/runtime handoff. Reboot or compute-service restart will return to normal handoff.\n'
+    else
+        warn 'P2P ENABLE FAILED; details are in the right log pane.'
+    fi
+
+    ui '\nPress Enter to return: '
+    [[ -t 0 ]] && read -r _ || true
+}
+
 
 show_install_cuda() {
     STEP_NO=0
@@ -734,11 +961,12 @@ menu() {
     banner 1
     ui '1) COMPUTE UNLOCK\n'
     ui '2) PCIe GEN2\n'
-    ui '3) VERIFY\n'
-    ui '4) INSTALL CUDA TOOLKIT\n'
-    ui '5) INSTALL 4-BEEP AT START\n'
-    ui '6) INSTALL FAN/GPU HELPERS\n'
-    ui '7) UNINSTALL\n'
+    ui '3) ENABLE P2P\n'
+    ui '4) VERIFY\n'
+    ui '5) INSTALL CUDA TOOLKIT\n'
+    ui '6) INSTALL 4-BEEP AT START\n'
+    ui '7) INSTALL FAN/GPU HELPERS\n'
+    ui '8) UNINSTALL\n'
     ui '0) EXIT\n\nSelect: '
 }
 
@@ -1695,6 +1923,8 @@ Usage:
   sudo ./rejoin17.sh
   sudo ./rejoin17.sh --compute-unlock
   sudo ./rejoin17.sh --gen2
+  sudo ./rejoin17.sh --p2p-enable
+  sudo ./rejoin17.sh --p2p-status
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
   sudo ./rejoin17.sh --install-beep
@@ -1723,6 +1953,8 @@ main() {
                 main
             fi
             ;;
+        --p2p|--p2p-menu|--p2p-enable) show_enable_p2p ;;
+        --p2p-status) show_p2p_status ;;
         --verify|--status) show_verify ;;
         --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;
@@ -1740,11 +1972,12 @@ main() {
                 case "$choice" in
                     1) clean_install_unlock ;;
                     2) show_apply_gen2 ;;
-                    3) show_verify ;;
-                    4) show_install_cuda ;;
-                    5) show_install_boot_beep ;;
-                    6) show_install_helpers ;;
-                    7)
+                    3) show_enable_p2p ;;
+                    4) show_verify ;;
+                    5) show_install_cuda ;;
+                    6) show_install_boot_beep ;;
+                    7) show_install_helpers ;;
+                    8)
                         ui 'Type UNINSTALL to remove everything: '
                         IFS= read -r confirm
                         [[ "$confirm" == "UNINSTALL" ]] && uninstall_all || warn 'cancelled'
