@@ -13,7 +13,7 @@
 
 ```
 
-Инструмент для CMP 90HX с двумя независимыми действиями: установка compute unlock и ручное включение PCIe Gen2.
+Инструмент для CMP 90HX с независимыми действиями: установка compute unlock, ручное включение PCIe Gen2 и ручное включение P2P.
 
 ## Совместимость
 
@@ -30,11 +30,12 @@
 ```text
 1) COMPUTE UNLOCK
 2) PCIe GEN2
-3) VERIFY
-4) INSTALL CUDA TOOLKIT
-5) INSTALL 4-BEEP AT START
-6) INSTALL FAN/GPU HELPERS
-7) UNINSTALL
+3) ENABLE P2P
+4) VERIFY
+5) INSTALL CUDA TOOLKIT
+6) INSTALL 4-BEEP AT START
+7) INSTALL FAN/GPU HELPERS
+8) UNINSTALL
 0) EXIT
 ```
 ![mainmenu](images/menu.jpg)
@@ -74,9 +75,35 @@
 
 После того как Compute Unlock и Gen2 стабильно работают, я не рекомендую выключать или перезагружать сервер без необходимости. Compute Unlock сохраняется, но PCIe Gen2 после каждой загрузки нужно включать заново.
 
+### ENABLE P2P
+
+Включает peer-to-peer обмен между CMP 90HX для текущей сессии драйвера. P2P требует уже установленный Compute Unlock: пункт использует тот же патченный `nvidia.ko`, но перезагружает его один раз с параметрами P2P и выставляет IOMMU groups в `identity`.
+
+P2P не прописывается в автозапуск и не меняет обычный compute handoff. После перезагрузки, перезапуска compute service или выгрузки драйвера P2P нужно включать заново через `ENABLE P2P`.
+
+Рекомендуемый порядок:
+
+```text
+1) COMPUTE UNLOCK - выполнить один раз
+2) PCIe GEN2 - включить Gen2 после загрузки сервера
+3) ENABLE P2P - включить P2P после успешного Gen2
+4) VERIFY - проверить compute unlock, P2P status и PCIe link
+```
+
+Gen2 не является строгим условием для самой кнопки P2P, но для производительности лучше сначала включить Gen2, а уже затем P2P. На проверенной паре CMP 90HX `0000:02:00.0 -> 0000:03:00.0` и обратно был получен реальный peer copy около `6.70 GB/s` при `buffer size: 256 MiB, iterations: 32` на PCIe Gen2.
+
+Для ручной проверки можно использовать:
+
+```bash
+sudo ./cmp90hxpwner.sh --p2p-enable
+sudo ./cmp90hxpwner.sh --p2p-status
+nvidia-smi topo -p2p r
+nvidia-smi topo -p2p w
+```
+
 ## Установка
 
-Проект рассчитан на headless-сервер. Монитор к серверу подключать не рекомендуется вообще: установка, Compute Unlock и PCIe Gen2 предполагают работу по SSH. Подключённый дисплей может привести к загрузке `nouveau` и занятию CMP 90HX до того, как будет установлен нужный драйвер.
+Проект рассчитан на headless-сервер. Монитор к серверу подключать не рекомендуется вообще: установка, Compute Unlock, PCIe Gen2 и P2P предполагают работу по SSH. Подключённый дисплей может привести к загрузке `nouveau` и занятию CMP 90HX до того, как будет установлен нужный драйвер.
 
 Secure Boot должен быть выключен.
 
@@ -93,7 +120,8 @@ sudo ./cmp90hxpwner.sh
 ```text
 1) COMPUTE UNLOCK - выполнить один раз
 2) PCIe GEN2 - включить Gen2
-3) VERIFY - проверить Compute Unlock и PCIe link
+3) ENABLE P2P - включить P2P для текущей сессии драйвера
+4) VERIFY - проверить Compute Unlock, P2P status и PCIe link
 ```
 
 ![PCIEGEN2](images/pcie.jpg)
@@ -104,11 +132,13 @@ Compute Unlock сохраняется и активируется автомат
 
 PCIe Gen2 не сохраняется - после каждой перезагрузки его нужно включать повторно через `PCIe GEN2`.
 
+P2P тоже не сохраняется - после каждой перезагрузки или перезагрузки NVIDIA-драйвера его нужно включать повторно через `ENABLE P2P`.
+
 Если сервер перезагружать не требуется, для простоя карт можно использовать `gpu-idle`, а перед нагрузкой - `gpu-full`.
 
 ## VERIFY
 
-Проверяет отдельно существующий compute unlock и текущее состояние PCIe link. Проверка ничего не применяет и не включает Gen2.
+Проверяет отдельно существующий compute unlock, текущее состояние P2P runtime и текущее состояние PCIe link. Проверка ничего не применяет, не включает Gen2 и не включает P2P.
 
 ## Дополнительные пункты
 
@@ -136,14 +166,14 @@ gpu-idle - Сбрасывает lock частоты ядра и фиксируе
 
 ## Warning
 
-Это низкоуровневый экспериментальный проект для CMP 90HX. Он заменяет NVIDIA kernel modules и меняет состояние PCIe/GPU во время ручного Gen2-прохода. Используйте на свой риск.
+Это низкоуровневый экспериментальный проект для CMP 90HX. Он заменяет NVIDIA kernel modules и меняет состояние PCIe/GPU во время ручного Gen2-прохода и ручного P2P-включения. Используйте на свой риск.
 
 
 ---
 
 # English
 
-A tool for CMP 90HX with two independent actions: applying the compute unlock and manually enabling PCIe Gen2.
+A tool for CMP 90HX with independent actions: applying the compute unlock, manually enabling PCIe Gen2, and manually enabling P2P.
 
 ## Compatibility
 
@@ -160,11 +190,12 @@ A tool for CMP 90HX with two independent actions: applying the compute unlock an
 ```text
 1) COMPUTE UNLOCK
 2) PCIe GEN2
-3) VERIFY
-4) INSTALL CUDA TOOLKIT
-5) INSTALL 4-BEEP AT START
-6) INSTALL FAN/GPU HELPERS
-7) UNINSTALL
+3) ENABLE P2P
+4) VERIFY
+5) INSTALL CUDA TOOLKIT
+6) INSTALL 4-BEEP AT START
+7) INSTALL FAN/GPU HELPERS
+8) UNINSTALL
 0) EXIT
 ```
 
@@ -203,9 +234,35 @@ If you see clearly abnormal errors, cards disappear from the system, or repeated
 
 Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecessary shutdowns or reboots. Compute Unlock persists, but PCIe Gen2 must be enabled again after every boot.
 
+### ENABLE P2P
+
+Enables peer-to-peer transfers between CMP 90HX cards for the current driver session. P2P requires Compute Unlock: this action uses the same patched `nvidia.ko`, but reloads it once with P2P parameters and switches the relevant IOMMU groups to `identity`.
+
+P2P is not written to autostart and does not change the normal compute handoff. After a reboot, compute service restart, or NVIDIA driver unload/reload, enable P2P again through `ENABLE P2P`.
+
+Recommended order:
+
+```text
+1) COMPUTE UNLOCK - run once
+2) PCIe GEN2 - enable Gen2 after boot
+3) ENABLE P2P - enable P2P after successful Gen2
+4) VERIFY - check Compute Unlock, P2P status, and the PCIe link
+```
+
+Gen2 is not a strict requirement for pressing the P2P button, but for performance it is better to enable Gen2 first and P2P second. On a tested CMP 90HX pair, `0000:02:00.0 -> 0000:03:00.0` and the reverse direction reached a real peer copy result of about `6.70 GB/s` with `buffer size: 256 MiB, iterations: 32` on PCIe Gen2.
+
+For manual checks:
+
+```bash
+sudo ./cmp90hxpwner.sh --p2p-enable
+sudo ./cmp90hxpwner.sh --p2p-status
+nvidia-smi topo -p2p r
+nvidia-smi topo -p2p w
+```
+
 ## Installation
 
-This project is designed for headless servers. Avoid connecting a monitor to the server at all: installation, Compute Unlock, and PCIe Gen2 are intended to be performed over SSH. A connected display may cause `nouveau` to load and claim the CMP 90HX before the required driver is installed.
+This project is designed for headless servers. Avoid connecting a monitor to the server at all: installation, Compute Unlock, PCIe Gen2, and P2P are intended to be performed over SSH. A connected display may cause `nouveau` to load and claim the CMP 90HX before the required driver is installed.
 
 Secure Boot must be disabled.
 
@@ -222,7 +279,8 @@ Then:
 ```text
 1) COMPUTE UNLOCK - run once
 2) PCIe GEN2 - enable Gen2
-3) VERIFY - check Compute Unlock and the PCIe link
+3) ENABLE P2P - enable P2P for the current driver session
+4) VERIFY - check Compute Unlock, P2P status, and the PCIe link
 ```
 
 ![PCIEGEN2](images/pcie.jpg)
@@ -233,11 +291,13 @@ Compute Unlock persists and is activated automatically.
 
 PCIe Gen2 does not persist - after every reboot, enable it again through `PCIe GEN2`.
 
+P2P also does not persist - after every reboot or NVIDIA driver reload, enable it again through `ENABLE P2P`.
+
 If the server does not need to be rebooted, use `gpu-idle` while the cards are idle and `gpu-full` before starting a workload.
 
 ## VERIFY
 
-Checks the existing compute unlock and the current PCIe link state separately. Verification does not apply any changes and does not enable Gen2.
+Checks the existing compute unlock, the current P2P runtime status, and the current PCIe link state separately. Verification does not apply any changes and does not enable Gen2 or P2P.
 
 ## Additional options
 
@@ -265,4 +325,4 @@ gpu-idle - Resets the core clock lock and fixes VRAM at 405 MHz; the card drops 
 
 ## Warning
 
-This is a low-level experimental project for the CMP 90HX. It replaces NVIDIA kernel modules and changes PCIe/GPU state during the manual Gen2 procedure. Use it at your own risk.
+This is a low-level experimental project for the CMP 90HX. It replaces NVIDIA kernel modules and changes PCIe/GPU state during the manual Gen2 procedure and manual P2P enablement. Use it at your own risk.
