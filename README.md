@@ -77,9 +77,9 @@
 
 ### ENABLE P2P
 
-**Экспериментальный BAR1 P2P.** При COMPUTE UNLOCK патч 0200 накладывается поверх существующей цепочки 0014–0017 NVIDIA 610.43.03. ENABLE P2P автоматически пересобирает ранее установленный драйвер без BAR1. Режим запуска: `RMPcieP2PType=1` (BAR1 вместо mailbox). Используются штатные пути NVIDIA для BAR1/GMMU/peer PTE, без ручной подмены физических таблиц.
+**Экспериментальный BAR1 P2P.** При COMPUTE UNLOCK встроенный патч 0200 накладывается поверх существующей цепочки 0014–0017 NVIDIA 610.43.03. ENABLE P2P автоматически пересобирает ранее установленный драйвер без BAR1. Режим запуска: `RMPcieP2PType=1` (BAR1 вместо mailbox). Используются штатные пути NVIDIA для BAR1/GMMU/peer PTE, без ручной подмены физических таблиц.
 
-`nvidia-smi topo -p2p` и `cudaMemcpyPeer` **не подтверждают** прямой доступ CUDA-ядер к памяти соседней GPU. Запустите `sudo ./cmp90hxpwner.sh --p2p-test` (требуется `nvcc`). При ENABLE P2P тест выполняется автоматически, если `nvcc` установлен: `SIGBUS`, ошибка чтения или неверные данные означают провал. Без `nvcc` совместимость SM/LLM остаётся непроверенной. BAR1 должен покрывать весь framebuffer (10 GiB на CMP 90HX).
+`nvidia-smi topo -p2p` и `cudaMemcpyPeer` **не подтверждают** прямой доступ CUDA-ядер к памяти соседней GPU. В пункте меню `3) ENABLE P2P` CUDA-тест выполняется автоматически, если установлен `nvcc`: `SIGBUS`, ошибка чтения или неверные данные означают провал. Без `nvcc` совместимость SM/LLM остаётся непроверенной. BAR1 должен покрывать весь framebuffer (10 GiB на CMP 90HX).
 
 Включает peer-to-peer обмен между CMP 90HX для текущей сессии драйвера. P2P требует уже установленный Compute Unlock: пункт использует тот же патченный `nvidia.ko`, но перезагружает его один раз с параметрами P2P и выставляет IOMMU groups в `identity`.
 
@@ -242,9 +242,9 @@ Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecess
 
 ### ENABLE P2P
 
-**Experimental BAR1 P2P.** Patch 0200 is layered on the existing NVIDIA 610.43.03 compute/Gen2 patches (0014–0017). ENABLE P2P rebuilds a previously installed legacy module when needed and sets `RMPcieP2PType=1` instead of mailbox mode. It uses NVIDIA's native BAR1/GMMU/peer PTE handling.
+**Experimental BAR1 P2P.** Embedded patch 0200 is layered on the existing NVIDIA 610.43.03 compute/Gen2 patches (0014–0017). ENABLE P2P rebuilds a previously installed legacy module when needed and sets `RMPcieP2PType=1` instead of mailbox mode. It uses NVIDIA's native BAR1/GMMU/peer PTE handling.
 
-A passing topology check or `cudaMemcpyPeer` **does not prove** that CUDA SM kernels can read peer VRAM. Run `sudo ./cmp90hxpwner.sh --p2p-test` with `nvcc`. ENABLE P2P also runs it when possible. SIGBUS, incorrect data or peer-access errors are reported as failures; without `nvcc`, direct SM/LLM support remains unverified. Full-size BAR1 (at least 10 GiB for CMP 90HX) is required.
+A passing topology check or `cudaMemcpyPeer` **does not prove** that CUDA SM kernels can read peer VRAM. The `3) ENABLE P2P` menu action runs the embedded CUDA test automatically when `nvcc` is available. SIGBUS, incorrect data or peer-access errors are reported as failures; without `nvcc`, direct SM/LLM support remains unverified. Full-size BAR1 (at least 10 GiB for CMP 90HX) is required.
 
 Enables peer-to-peer transfers between CMP 90HX cards for the current driver session. P2P requires Compute Unlock: this action uses the same patched `nvidia.ko`, but reloads it once with P2P parameters and switches the relevant IOMMU groups to `identity`.
 

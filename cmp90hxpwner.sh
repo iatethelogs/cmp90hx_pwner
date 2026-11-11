@@ -521,11 +521,144 @@ install_stock_driver() {
 # Keep compute/Gen2 0014..0017 intact; layer the BAR1 P2P patch afterwards.
 stage_bar1_patch() {
     local p="$PROJECT_DIR/patches/0200-cmp90hx-bar1-p2p.patch"
-    local local_p="$(dirname "$SELF_PATH")/patches/0200-cmp90hx-bar1-p2p.patch"
     mkdir -p "$PROJECT_DIR/patches"
-    if [[ -r "$local_p" ]]; then cp "$local_p" "$p"; else
-        download_with_retry "https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/patches/0200-cmp90hx-bar1-p2p.patch" "$p" || return 1
-    fi
+    # Self-contained: the RM/HAL/GMMU patch lives in this installer.
+    cat > "$p" <<'EOF_CMP90_BAR1_PATCH'
+diff --git a/src/nvidia/src/kernel/gpu/bif/kernel_bif.c b/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+--- a/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
++++ b/src/nvidia/src/kernel/gpu/bif/kernel_bif.c
+@@ -1128,7 +1128,7 @@
+     NvU32 data32;
+ 
+     // P2P Override
+-    pKernelBif->p2pOverride = BIF_P2P_NOT_OVERRIDEN;
++    pKernelBif->p2pOverride = 0x11;
+     if (osReadRegistryDword(pGpu, NV_REG_STR_CL_FORCE_P2P, &data32) == NV_OK)
+     {
+         pKernelBif->p2pOverride = data32;
+@@ -1144,7 +1144,8 @@
+         pKernelBif->forceP2PType = data32;
+     }
+ 
+-    pKernelBif->pcieP2PType = NV_REG_STR_RM_PCIEP2P_TYPE_DEFAULT;
++    pKernelBif->pcieP2PType = NV_REG_STR_RM_PCIEP2P_TYPE_BAR1;
++    NV_PRINTF(LEVEL_INFO, "CMP90_BAR1_P2P_6104303: BAR1 P2P support compiled into RM\n");
+     if (osReadRegistryDword(pGpu, NV_REG_STR_RM_PCIEP2P_TYPE, &data32) == NV_OK)
+     {
+         pKernelBif->pcieP2PType = data32;
+diff --git a/src/nvidia/generated/g_kern_bus_nvoc.c b/src/nvidia/generated/g_kern_bus_nvoc.c
+--- a/src/nvidia/generated/g_kern_bus_nvoc.c
++++ b/src/nvidia/generated/g_kern_bus_nvoc.c
+@@ -1066,7 +1066,7 @@
+     // default
+     else
+     {
+-        pThis->__kbusGetBar1P2PDmaInfo__ = &kbusGetBar1P2PDmaInfo_395e98;
++        pThis->__kbusGetBar1P2PDmaInfo__ = &kbusGetBar1P2PDmaInfo_GH100;
+     }
+ 
+     // kbusIncreaseStaticBar1Refcount -- halified (2 hals) body
+@@ -1114,7 +1114,7 @@
+     // default
+     else
+     {
+-        pThis->__kbusCreateP2PMappingForBar1P2P__ = &kbusCreateP2PMappingForBar1P2P_395e98;
++        pThis->__kbusCreateP2PMappingForBar1P2P__ = &kbusCreateP2PMappingForBar1P2P_GH100;
+     }
+ 
+     // kbusRemoveP2PMappingForBar1P2P -- halified (2 hals) body
+@@ -1126,7 +1126,7 @@
+     // default
+     else
+     {
+-        pThis->__kbusRemoveP2PMappingForBar1P2P__ = &kbusRemoveP2PMappingForBar1P2P_395e98;
++        pThis->__kbusRemoveP2PMappingForBar1P2P__ = &kbusRemoveP2PMappingForBar1P2P_GH100;
+     }
+ 
+     // kbusHasPcieBar1P2PMapping -- halified (2 hals) body
+@@ -1138,7 +1138,7 @@
+     // default
+     else
+     {
+-        pThis->__kbusHasPcieBar1P2PMapping__ = &kbusHasPcieBar1P2PMapping_d69453;
++        pThis->__kbusHasPcieBar1P2PMapping__ = &kbusHasPcieBar1P2PMapping_GH100;
+     }
+ 
+     // kbusIsPcieBar1P2PMappingSupported -- halified (2 hals) body
+@@ -1150,7 +1150,7 @@
+     // default
+     else
+     {
+-        pThis->__kbusIsPcieBar1P2PMappingSupported__ = &kbusIsPcieBar1P2PMappingSupported_d69453;
++        pThis->__kbusIsPcieBar1P2PMappingSupported__ = &kbusIsPcieBar1P2PMappingSupported_GH100;
+     }
+ 
+     // kbusCheckFlaSupportedAndInit -- halified (2 hals) body
+diff --git a/src/nvidia/generated/g_virt_mem_allocator_nvoc.c b/src/nvidia/generated/g_virt_mem_allocator_nvoc.c
+--- a/src/nvidia/generated/g_virt_mem_allocator_nvoc.c
++++ b/src/nvidia/generated/g_virt_mem_allocator_nvoc.c
+@@ -338,7 +338,7 @@
+     // default
+     else
+     {
+-        pThis->__dmaAllocBar1P2PMapping__ = &dmaAllocBar1P2PMapping_395e98;
++        pThis->__dmaAllocBar1P2PMapping__ = &dmaAllocBar1P2PMapping_GH100;
+     }
+ 
+     // dmaFreeBar1P2PMapping -- halified (2 hals) body
+@@ -350,7 +350,7 @@
+     // default
+     else
+     {
+-        pThis->__dmaFreeBar1P2PMapping__ = &dmaFreeBar1P2PMapping_d44104;
++        pThis->__dmaFreeBar1P2PMapping__ = &dmaFreeBar1P2PMapping_GH100;
+     }
+ 
+     // dmaIsDefaultGpuUncached -- halified (2 hals) body
+diff --git a/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c b/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
+--- a/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
++++ b/src/nvidia/src/kernel/gpu/bus/arch/pascal/kern_bus_gp100.c
+@@ -65,10 +65,15 @@
+         return kbusCreateP2PMappingForNvlink_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+     }
+ 
+-    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
+-    {
+-        return kbusCreateP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+-    }
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE_BAR1, attributes))
++    {
++        return kbusCreateP2PMappingForBar1P2P_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, attributes);
++    }
++
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
++    {
++        return kbusCreateP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
++    }
+ 
+     NV_PRINTF(LEVEL_ERROR, "P2P type %d is not supported\n", DRF_VAL(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, attributes));
+ 
+@@ -643,10 +648,15 @@
+         return kbusRemoveP2PMappingForNvlink_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+     }
+ 
+-    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
+-    {
+-        return kbusRemoveP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
+-    }
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE_BAR1, attributes))
++    {
++        return kbusRemoveP2PMappingForBar1P2P_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, attributes);
++    }
++
++    if (FLD_TEST_DRF(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, _PCIE, attributes))
++    {
++        return kbusRemoveP2PMappingForMailbox_HAL(pGpu0, pKernelBus0, pGpu1, pKernelBus1, peer0, peer1, attributes);
++    }
+ 
+     NV_PRINTF(LEVEL_ERROR, "P2P type %d is not supported\n", DRF_VAL(_P2PAPI, _ATTRIBUTES, _CONNECTION_TYPE, attributes));
+ 
+EOF_CMP90_BAR1_PATCH
     python3 - "$PROJECT_DIR/scripts/install.sh" <<'PY_BAR1'
 from pathlib import Path
 import sys
@@ -915,13 +1048,151 @@ bar1_resource_check() {
 }
 
 bar1_sm_test() {
-    local local_src="$(dirname "$SELF_PATH")/tools/bar1_peer_smoke.cu"
     local src="/var/tmp/cmp90hx-bar1-peer-smoke.cu"
     local out="/var/tmp/cmp90hx-bar1-peer-smoke"
-    command -v nvcc >/dev/null 2>&1 || { echo 'nvcc missing; install CUDA toolkit for SM peer test'; return 2; }
-    if [[ -r "$local_src" ]]; then cp "$local_src" "$src"; else
-        download_with_retry "https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/tools/bar1_peer_smoke.cu" "$src" || return 1
-    fi
+    command -v nvcc >/dev/null 2>&1 || {
+        echo 'nvcc missing; CUDA SM peer access test not run'
+        return 2
+    }
+    # Embedded CUDA test; no external repository files or CLI switches.
+    cat > "$src" <<'EOF_CMP90_BAR1_CUDA'
+// CMP90HX BAR1 P2P: validate SM reads from another GPU's allocation.
+// Build: nvcc -O2 -std=c++14 tools/bar1_peer_smoke.cu -o bar1_peer_smoke
+#include <cuda_runtime.h>
+#include <cstdio>
+#include <vector>
+
+static constexpr int kWords = 4096;
+
+__global__ void read_peer(const unsigned int *remote, unsigned int *local)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < kWords)
+        local[index] = remote[index] ^ 0x5a5a5a5aU;
+}
+
+__global__ void write_peer(unsigned int *remote)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < kWords)
+        remote[index] = 0x9e3779b9U ^ static_cast<unsigned int>(index);
+}
+
+static int test_pair(int dst, int src)
+{
+    unsigned int *remote = nullptr;
+    unsigned int *local = nullptr;
+    bool enabled = false;
+    bool success = false;
+    const size_t bytes = static_cast<size_t>(kWords) * sizeof(unsigned int);
+    cudaError_t status;
+    int can_access = 0;
+
+#define CHECK(call) do { \
+    status = (call); \
+    if (status != cudaSuccess) { \
+        std::fprintf(stderr, "GPU%d <- GPU%d: %s: %s\n", dst, src, #call, cudaGetErrorString(status)); \
+        goto cleanup; \
+    } \
+} while (0)
+
+    CHECK(cudaDeviceCanAccessPeer(&can_access, dst, src));
+    if (!can_access) {
+        std::fprintf(stderr, "GPU%d <- GPU%d: CUDA peer access unavailable\n", dst, src);
+        goto cleanup;
+    }
+    CHECK(cudaSetDevice(src));
+    CHECK(cudaMalloc(reinterpret_cast<void **>(&remote), bytes));
+    CHECK(cudaMemset(remote, 0xa5, bytes));
+    CHECK(cudaDeviceSynchronize());
+
+    CHECK(cudaSetDevice(dst));
+    CHECK(cudaMalloc(reinterpret_cast<void **>(&local), bytes));
+    status = cudaDeviceEnablePeerAccess(src, 0);
+    if (status == cudaSuccess)
+        enabled = true;
+    else if (status == cudaErrorPeerAccessAlreadyEnabled)
+        cudaGetLastError();
+    else {
+        std::fprintf(stderr, "GPU%d <- GPU%d: cudaDeviceEnablePeerAccess: %s\n", dst, src,
+                     cudaGetErrorString(status));
+        goto cleanup;
+    }
+
+    read_peer<<<(kWords + 255) / 256, 256>>>(remote, local);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());  // Catches remote SM access faults / SIGBUS.
+
+    {
+        std::vector<unsigned int> host(kWords);
+        CHECK(cudaMemcpy(host.data(), local, bytes, cudaMemcpyDeviceToHost));
+        for (int i = 0; i < kWords; ++i) {
+            if (host[i] != 0xffffffffU) {
+                std::fprintf(stderr, "GPU%d <- GPU%d: mismatch[%d] = 0x%08x\n",
+                             dst, src, i, host[i]);
+                goto cleanup;
+            }
+        }
+    }
+    // Verify remote SM writes independently: the destination GPU's kernel
+    // changes a source GPU allocation, which must be visible to its owner.
+    write_peer<<<(kWords + 255) / 256, 256>>>(remote);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    CHECK(cudaSetDevice(src));
+    {
+        std::vector<unsigned int> host(kWords);
+        CHECK(cudaMemcpy(host.data(), remote, bytes, cudaMemcpyDeviceToHost));
+        for (int i = 0; i < kWords; ++i) {
+            unsigned int expected = 0x9e3779b9U ^ static_cast<unsigned int>(i);
+            if (host[i] != expected) {
+                std::fprintf(stderr, "GPU%d -> GPU%d: remote write mismatch[%d] = 0x%08x\n",
+                             dst, src, i, host[i]);
+                goto cleanup;
+            }
+        }
+    }
+    success = true;
+    std::printf("BAR1_SM_PEER_PASS GPU%d <-> GPU%d: direct SM read/write (%zu bytes)\n",
+                dst, src, bytes);
+
+cleanup:
+    cudaSetDevice(dst);
+    if (enabled)
+        cudaDeviceDisablePeerAccess(src);
+    if (local)
+        cudaFree(local);
+    cudaSetDevice(src);
+    if (remote)
+        cudaFree(remote);
+#undef CHECK
+    return success ? 0 : 1;
+}
+
+int main()
+{
+    int devices = 0;
+    cudaError_t status = cudaGetDeviceCount(&devices);
+    if (status != cudaSuccess || devices < 2) {
+        std::fprintf(stderr, "Expected >=2 CUDA GPUs: %s, count=%d\n",
+                     cudaGetErrorString(status), devices);
+        return 2;
+    }
+    int failures = 0;
+    for (int dst = 0; dst < devices; ++dst) {
+        for (int src = 0; src < devices; ++src) {
+            if (dst != src)
+                failures += test_pair(dst, src);
+        }
+    }
+    if (failures) {
+        std::fprintf(stderr, "BAR1_SM_PEER_FAIL: %d directed pairs failed\n", failures);
+        return 1;
+    }
+    std::printf("BAR1_SM_PEER_ALL_PASS: %d directed pairs\n", devices * (devices - 1));
+    return 0;
+}
+EOF_CMP90_BAR1_CUDA
     nvcc -std=c++14 -O2 "$src" -o "$out" || return 1
     timeout 120 "$out"
 }
@@ -2066,7 +2337,6 @@ Usage:
   sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --p2p-enable
   sudo ./rejoin17.sh --p2p-status
-  sudo ./rejoin17.sh --p2p-test
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
   sudo ./rejoin17.sh --install-beep
@@ -2097,7 +2367,6 @@ main() {
             ;;
         --p2p|--p2p-menu|--p2p-enable) show_enable_p2p ;;
         --p2p-status) show_p2p_status ;;
-        --p2p-test) bar1_sm_test ;;
         --verify|--status) show_verify ;;
         --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;
