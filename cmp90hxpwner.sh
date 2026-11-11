@@ -1066,7 +1066,7 @@ show_enable_p2p() {
 
     if [[ "$failed" == "0" ]]; then
         if [[ "$sm_ok" == "1" ]]; then
-            ok 'BAR1 P2P + DIRECT CUDA SM PEER READ VERIFIED'
+            ok 'BAR1 P2P + DIRECT CUDA SM PEER READ/WRITE VERIFIED'
         else
             ok 'BAR1 P2P CONFIGURED; SM PEER READ NOT VERIFIED (nvcc unavailable)'
         fi
