@@ -928,20 +928,28 @@ bar1_sm_test() {
 
 # Debian 13 BAR0 readback=none (issue #7, @n0kkster). Avoid futile retries.
 gen2_bar0_preflight() {
-    local d error
-    d="$(find_cmps | head -1)"
-    [[ -n "$d" && -r "$PREFIX/maskread.py" ]] || { echo 'BAR0 reader or CMP GPU missing'; return 1; }
+    local d error denied=0 count=0
+    [[ -r "$PREFIX/maskread.py" ]] || { echo 'BAR0 reader missing'; return 1; }
     nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || {
         echo 'GPU driver unavailable; leaving GRUB unchanged'; return 1;
     }
-    if error="$(python3 "$PREFIX/maskread.py" "$d" 0x00823800 2>&1)"; then
-        printf 'BAR0 read OK: %s\n' "$error"; return 0
-    fi
-    printf 'BAR0 error: %s\n' "$error"
-    case "$error" in
-        *"Errno 22"*|*"Errno 1]"*|*"Errno 13]"*|*"Invalid argument"*|*"Operation not permitted"*|*"Permission denied"*) ;;
-        *) return 1 ;;
-    esac
+    # Check every CMP card, including those attached to the second NUMA CPU.
+    for d in $(find_cmps); do
+        count=$((count + 1))
+        if error="$(python3 "$PREFIX/maskread.py" "$d" 0x00823800 2>&1)"; then
+            printf '%s BAR0 read OK: %s\n' "$d" "$error"
+            continue
+        fi
+        printf '%s BAR0 error: %s\n' "$d" "$error"
+        case "$error" in
+            *"Errno 22"*|*"Errno 1]"*|*"Errno 13]"*|*"Invalid argument"*|*"Operation not permitted"*|*"Permission denied"*) ;;
+            *) return 1 ;;
+        esac
+        denied=1
+        break
+    done
+    [[ "$count" -gt 0 ]] || { echo 'No CMP 90HX GPUs found'; return 1; }
+    [[ "$denied" == "1" ]] || return 0
     if grep -qw 'iomem=relaxed' /proc/cmdline; then
         echo 'iomem=relaxed already active; check BAR0 or driver state'; return 1
     fi
