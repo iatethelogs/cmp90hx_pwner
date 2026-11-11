@@ -13,6 +13,13 @@ __global__ void read_peer(const unsigned int *remote, unsigned int *local)
         local[index] = remote[index] ^ 0x5a5a5a5aU;
 }
 
+__global__ void write_peer(unsigned int *remote)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if (index < kWords)
+        remote[index] = 0x9e3779b9U ^ static_cast<unsigned int>(index);
+}
+
 static int test_pair(int dst, int src)
 {
     unsigned int *remote = nullptr;
@@ -69,8 +76,27 @@ static int test_pair(int dst, int src)
             }
         }
     }
+    // Verify remote SM writes independently: the destination GPU's kernel
+    // changes a source GPU allocation, which must be visible to its owner.
+    write_peer<<<(kWords + 255) / 256, 256>>>(remote);
+    CHECK(cudaGetLastError());
+    CHECK(cudaDeviceSynchronize());
+    CHECK(cudaSetDevice(src));
+    {
+        std::vector<unsigned int> host(kWords);
+        CHECK(cudaMemcpy(host.data(), remote, bytes, cudaMemcpyDeviceToHost));
+        for (int i = 0; i < kWords; ++i) {
+            unsigned int expected = 0x9e3779b9U ^ static_cast<unsigned int>(i);
+            if (host[i] != expected) {
+                std::fprintf(stderr, "GPU%d -> GPU%d: remote write mismatch[%d] = 0x%08x\n",
+                             dst, src, i, host[i]);
+                goto cleanup;
+            }
+        }
+    }
     success = true;
-    std::printf("BAR1_SM_PEER_PASS GPU%d <- GPU%d (%zu bytes)\n", dst, src, bytes);
+    std::printf("BAR1_SM_PEER_PASS GPU%d <-> GPU%d: direct SM read/write (%zu bytes)\n",
+                dst, src, bytes);
 
 cleanup:
     cudaSetDevice(dst);
