@@ -964,6 +964,36 @@ gen2_bar0_preflight() {
     return 1
 }
 
+
+# An "OK" anywhere in the topology matrix is not enough on a five-GPU rig.
+p2p_topology_all_ok() {
+    python3 -c '
+import re
+import sys
+data = [line.split() for line in sys.stdin.read().splitlines()]
+is_gpu = lambda x: re.fullmatch(r"GPU[0-9]+", x) is not None
+headers = next((row for row in data if len(row) >= 2 and all(is_gpu(x) for x in row)), [])
+if len(headers) < 2:
+    print("P2P matrix missing two or more GPUs")
+    raise SystemExit(1)
+rows = {row[0]: row[1:] for row in data if row and is_gpu(row[0]) and row[0] in headers}
+failed = []
+for src in headers:
+    values = rows.get(src, [])
+    if len(values) < len(headers):
+        failed.append((src, "missing", "row"))
+        continue
+    for j, dst in enumerate(headers):
+        if src != dst and values[j] != "OK":
+            failed.append((src, dst, values[j]))
+for src, dst, value in failed:
+    print(f"P2P unavailable: {src} -> {dst}: {value}")
+if failed:
+    raise SystemExit(1)
+print(f"P2P topology OK on all {len(headers) * (len(headers) - 1)} directed GPU pairs")
+' <<< "$1"
+}
+
 verify_p2p_runtime_strict() {
     local d g t modpath bad=0 topo_r topo_w
 
@@ -994,12 +1024,12 @@ verify_p2p_runtime_strict() {
     printf '\nP2P topo read:\n'
     topo_r="$(nvidia-smi topo -p2p r 2>&1)" || bad=1
     printf '%s\n' "$topo_r"
-    printf '%s\n' "$topo_r" | grep -q 'OK' || bad=1
+    p2p_topology_all_ok "$topo_r" || bad=1
 
     printf '\nP2P topo write:\n'
     topo_w="$(nvidia-smi topo -p2p w 2>&1)" || bad=1
     printf '%s\n' "$topo_w"
-    printf '%s\n' "$topo_w" | grep -q 'OK' || bad=1
+    p2p_topology_all_ok "$topo_w" || bad=1
 
     printf '\nBAR1 aperture check:\n'
     bar1_resource_check || bad=1
