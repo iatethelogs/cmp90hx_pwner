@@ -517,6 +517,39 @@ install_stock_driver() {
     depmod -a
 }
 
+
+# Keep compute/Gen2 0014..0017 intact; layer the BAR1 P2P patch afterwards.
+stage_bar1_patch() {
+    local p="$PROJECT_DIR/patches/0200-cmp90hx-bar1-p2p.patch"
+    local local_p="$(dirname "$SELF_PATH")/patches/0200-cmp90hx-bar1-p2p.patch"
+    mkdir -p "$PROJECT_DIR/patches"
+    if [[ -r "$local_p" ]]; then cp "$local_p" "$p"; else
+        download_with_retry "https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/patches/0200-cmp90hx-bar1-p2p.patch" "$p" || return 1
+    fi
+    python3 - "$PROJECT_DIR/scripts/install.sh" <<'PY_BAR1'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+s = p.read_text()
+before = '    patch -p1 -s < "$REPO/patches/0017-cmp90hx-gen2-retrain-retry.patch"\n'
+after = '    patch -p1 -s < "$REPO/patches/0200-cmp90hx-bar1-p2p.patch"\n'
+if s.count(before) != 1:
+    raise SystemExit("Unsupported upstream install.sh; 0017 patch anchor missing")
+p.write_text(s.replace(before, before + after, 1))
+PY_BAR1
+}
+
+ensure_bar1_driver() {
+    local module="/usr/lib/modules/$(uname -r)/updates/cmpunlocker-90hx-stockflow/nvidia.ko"
+    [[ -f "$module" ]] || { echo 'Install COMPUTE UNLOCK first'; return 1; }
+    if grep -aFq CMP90_BAR1_P2P_6104303 "$module"; then return 0; fi
+    echo 'Rebuilding old mailbox driver with BAR1 P2P patch'
+    install_patched_driver || return 1
+    grep -aFq CMP90_BAR1_P2P_6104303 "$module" || {
+        echo 'BAR1 module marker not found after rebuild'; return 1;
+    }
+}
+
 install_patched_driver() {
     mkdir -p "$(dirname "$PROJECT_DIR")"
     git_clone_retry "$PROJECT_REPO" "$PROJECT_DIR"
@@ -528,6 +561,7 @@ install_patched_driver() {
         return 20
     }
     sed -i '/^# 7. systemd unit$/,$d' scripts/install.sh
+    stage_bar1_patch || return 1
     mkdir -p /etc/depmod.d
     bash scripts/install.sh
     depmod -a
@@ -829,7 +863,7 @@ load_patched_driver_once_with_p2p() {
     krel="$(uname -r)"
     patched_dir="/usr/lib/modules/${krel}/updates/cmpunlocker-90hx-stockflow"
     patched_srcv="$(modinfo -F srcversion "${patched_dir}/nvidia.ko" 2>/dev/null || true)"
-    p2p_reg='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=0;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
+    p2p_reg='ForceP2P=0x111;CLForceP2P=0x111;RMForceP2PType=1;RMPcieP2PType=1;RMForceStaticBar1=1;PeerMappingOverride=1;RMDisableFeatureDisablement=1'
 
     [[ -f "${patched_dir}/nvidia.ko" ]] || { printf 'patched nvidia.ko missing: %s\n' "${patched_dir}/nvidia.ko"; return 1; }
     [[ -n "$patched_srcv" ]] || { printf 'patched nvidia.ko srcversion missing\n'; return 1; }
@@ -864,6 +898,62 @@ load_patched_driver_once_with_p2p() {
     wait_gpu_for_p2p 30 || { printf 'GPU did not come up after patched P2P load\n'; return 1; }
 
     printf 'patched P2P module active\n'
+}
+
+
+bar1_resource_check() {
+    local d n failed=0
+    for d in $(find_cmps); do
+        n="$(stat -c %s "/sys/bus/pci/devices/$d/resource1" 2>/dev/null || true)"
+        printf '%s BAR1: %s bytes\n' "$d" "$n"
+        if [[ ! "$n" =~ ^[0-9]+$ ]] || (( n < 10737418240 )); then
+            echo 'BAR1 below 10 GiB: persistent peer mapping cannot be verified'
+            failed=1
+        fi
+    done
+    return "$failed"
+}
+
+bar1_sm_test() {
+    local local_src="$(dirname "$SELF_PATH")/tools/bar1_peer_smoke.cu"
+    local src="/var/tmp/cmp90hx-bar1-peer-smoke.cu"
+    local out="/var/tmp/cmp90hx-bar1-peer-smoke"
+    command -v nvcc >/dev/null 2>&1 || { echo 'nvcc missing; install CUDA toolkit for SM peer test'; return 2; }
+    if [[ -r "$local_src" ]]; then cp "$local_src" "$src"; else
+        download_with_retry "https://raw.githubusercontent.com/iatethelogs/cmp90hx_pwner/main/tools/bar1_peer_smoke.cu" "$src" || return 1
+    fi
+    nvcc -std=c++14 -O2 "$src" -o "$out" || return 1
+    timeout 120 "$out"
+}
+
+# Debian 13 BAR0 readback=none (issue #7, @n0kkster). Avoid futile retries.
+gen2_bar0_preflight() {
+    local d error
+    d="$(find_cmps | head -1)"
+    [[ -n "$d" && -r "$PREFIX/maskread.py" ]] || { echo 'BAR0 reader or CMP GPU missing'; return 1; }
+    nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || {
+        echo 'GPU driver unavailable; leaving GRUB unchanged'; return 1;
+    }
+    if error="$(python3 "$PREFIX/maskread.py" "$d" 0x00823800 2>&1)"; then
+        printf 'BAR0 read OK: %s\n' "$error"; return 0
+    fi
+    printf 'BAR0 error: %s\n' "$error"
+    case "$error" in
+        *"Errno 22"*|*"Errno 1]"*|*"Errno 13]"*|*"Invalid argument"*|*"Operation not permitted"*|*"Permission denied"*) ;;
+        *) return 1 ;;
+    esac
+    if grep -qw 'iomem=relaxed' /proc/cmdline; then
+        echo 'iomem=relaxed already active; check BAR0 or driver state'; return 1
+    fi
+    if [[ ! -f /etc/default/grub ]] || ! command -v update-grub >/dev/null 2>&1; then
+        echo 'GRUB unavailable; add iomem=relaxed to kernel cmdline manually'; return 1
+    fi
+    mkdir -p /etc/default/grub.d
+    echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT iomem=relaxed"' \
+        > /etc/default/grub.d/99-cmp90hx-iomem.cfg
+    update-grub || return 1
+    echo 'Added iomem=relaxed; reboot required. Gen2 not attempted.'
+    return 1
 }
 
 verify_p2p_runtime_strict() {
@@ -903,6 +993,9 @@ verify_p2p_runtime_strict() {
     printf '%s\n' "$topo_w"
     printf '%s\n' "$topo_w" | grep -q 'OK' || bad=1
 
+    printf '\nBAR1 aperture check:\n'
+    bar1_resource_check || bad=1
+    echo 'NOTE: topology and DMA tests do not verify direct CUDA SM remote reads'
     [[ "$bad" == "0" ]]
 }
 
@@ -917,20 +1010,28 @@ show_p2p_status() {
 
 show_enable_p2p() {
     STEP_NO=0
-    TOTAL_STEPS=5
-    local failed=0
+    TOTAL_STEPS=7
+    local failed=0 sm_ok=0
 
     clear_left
     banner
 
+    if [[ "$failed" == "0" ]] && ! run_step 'install BAR1 driver' ensure_bar1_driver; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'stop workers and unload nvidia' unload_nvidia_stack_for_p2p; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'set IOMMU identity' set_cmp_iommu_identity_now; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'disable ACS redirects' disable_acs_redirects_now; then failed=1; fi
     if [[ "$failed" == "0" ]] && ! run_step 'load patched driver with P2P' load_patched_driver_once_with_p2p; then failed=1; fi
-    if [[ "$failed" == "0" ]] && ! run_step 'verify P2P runtime' verify_p2p_runtime_strict; then failed=1; fi
+    if [[ "$failed" == "0" ]] && ! run_step 'verify BAR1 P2P runtime' verify_p2p_runtime_strict; then failed=1; fi
+    if [[ "$failed" == "0" ]] && command -v nvcc >/dev/null 2>&1; then
+        if run_step 'direct CUDA SM peer read test' bar1_sm_test; then sm_ok=1; else failed=1; fi
+    fi
 
     if [[ "$failed" == "0" ]]; then
-        ok 'P2P ENABLED FOR CURRENT DRIVER SESSION'
+        if [[ "$sm_ok" == "1" ]]; then
+            ok 'BAR1 P2P + DIRECT CUDA SM PEER READ VERIFIED'
+        else
+            ok 'BAR1 P2P CONFIGURED; SM PEER READ NOT VERIFIED (nvcc unavailable)'
+        fi
         ui '\nP2P is not written to boot/runtime handoff. Reboot or compute-service restart will return to normal handoff.\n'
     else
         warn 'P2P ENABLE FAILED; details are in the right log pane.'
@@ -1772,7 +1873,7 @@ clean_install_unlock() {
 
 show_apply_gen2() {
     STEP_NO=0
-    TOTAL_STEPS=3
+    TOTAL_STEPS=4
     clear_left
     banner
     if [[ ! -x "$PREFIX/cmp90hx-gen2-handoff.sh" || ! -x "$PREFIX/bar0poke" ]]; then
@@ -1781,6 +1882,8 @@ show_apply_gen2() {
         fail 'Could not disable the old boot hook. See the right log pane.'
     elif ! run_step 'write integrated known-good Gen2 runtime' write_gen2_runtime; then
         fail 'Could not write the Gen2 runtime. See the right log pane.'
+    elif ! run_step 'BAR0 read preflight (Debian iomem)' gen2_bar0_preflight; then
+        warn 'BAR0 not accessible; Gen2 skipped. See log for iomem=relaxed and reboot.'
     else
         ui '\nEach card: known-good soft pass, then aggressive and final soft if needed.\n'
         ui 'Remaining failures: known-good hard FEAT reset and up to 13 fresh writes, then final soft.\n'
@@ -1925,6 +2028,7 @@ Usage:
   sudo ./rejoin17.sh --gen2
   sudo ./rejoin17.sh --p2p-enable
   sudo ./rejoin17.sh --p2p-status
+  sudo ./rejoin17.sh --p2p-test
   sudo ./rejoin17.sh --verify
   sudo ./rejoin17.sh --install-cuda
   sudo ./rejoin17.sh --install-beep
@@ -1955,6 +2059,7 @@ main() {
             ;;
         --p2p|--p2p-menu|--p2p-enable) show_enable_p2p ;;
         --p2p-status) show_p2p_status ;;
+        --p2p-test) bar1_sm_test ;;
         --verify|--status) show_verify ;;
         --install-cuda|--cuda) show_install_cuda ;;
         --install-beep|--beep) show_install_boot_beep ;;

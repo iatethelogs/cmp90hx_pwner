@@ -77,6 +77,10 @@
 
 ### ENABLE P2P
 
+**Экспериментальный BAR1 P2P.** При COMPUTE UNLOCK патч 0200 накладывается поверх существующей цепочки 0014–0017 NVIDIA 610.43.03. ENABLE P2P автоматически пересобирает ранее установленный драйвер без BAR1. Режим запуска: `RMPcieP2PType=1` (BAR1 вместо mailbox). Используются штатные пути NVIDIA для BAR1/GMMU/peer PTE, без ручной подмены физических таблиц.
+
+`nvidia-smi topo -p2p` и `cudaMemcpyPeer` **не подтверждают** прямой доступ CUDA-ядер к памяти соседней GPU. Запустите `sudo ./cmp90hxpwner.sh --p2p-test` (требуется `nvcc`). При ENABLE P2P тест выполняется автоматически, если `nvcc` установлен: `SIGBUS`, ошибка чтения или неверные данные означают провал. Без `nvcc` совместимость SM/LLM остаётся непроверенной. BAR1 должен покрывать весь framebuffer (10 GiB на CMP 90HX).
+
 Включает peer-to-peer обмен между CMP 90HX для текущей сессии драйвера. P2P требует уже установленный Compute Unlock: пункт использует тот же патченный `nvidia.ko`, но перезагружает его один раз с параметрами P2P и выставляет IOMMU groups в `identity`.
 
 P2P не прописывается в автозапуск и не меняет обычный compute handoff. После перезагрузки, перезапуска compute service или выгрузки драйвера P2P нужно включать заново через `ENABLE P2P`.
@@ -102,6 +106,8 @@ nvidia-smi topo -p2p w
 ```
 
 ## Установка
+
+**Debian 13 / issue #7.** Перед Gen2 проверяется доступ к BAR0. При `EINVAL`/`EPERM` программа прекращает повторы, добавляет GRUB drop-in с `iomem=relaxed` и обновляет GRUB, если он установлен. Перезагрузка не запускается автоматически: перезагрузите сервер вручную и повторите Gen2. Решение предложено [@n0kkster](https://github.com/n0kkster). При других ошибках GRUB не меняется.
 
 Проект рассчитан на headless-сервер. Монитор к серверу подключать не рекомендуется вообще: установка, Compute Unlock, PCIe Gen2 и P2P предполагают работу по SSH. Подключённый дисплей может привести к загрузке `nouveau` и занятию CMP 90HX до того, как будет установлен нужный драйвер.
 
@@ -236,6 +242,10 @@ Once Compute Unlock and Gen2 are working reliably, I recommend avoiding unnecess
 
 ### ENABLE P2P
 
+**Experimental BAR1 P2P.** Patch 0200 is layered on the existing NVIDIA 610.43.03 compute/Gen2 patches (0014–0017). ENABLE P2P rebuilds a previously installed legacy module when needed and sets `RMPcieP2PType=1` instead of mailbox mode. It uses NVIDIA's native BAR1/GMMU/peer PTE handling.
+
+A passing topology check or `cudaMemcpyPeer` **does not prove** that CUDA SM kernels can read peer VRAM. Run `sudo ./cmp90hxpwner.sh --p2p-test` with `nvcc`. ENABLE P2P also runs it when possible. SIGBUS, incorrect data or peer-access errors are reported as failures; without `nvcc`, direct SM/LLM support remains unverified. Full-size BAR1 (at least 10 GiB for CMP 90HX) is required.
+
 Enables peer-to-peer transfers between CMP 90HX cards for the current driver session. P2P requires Compute Unlock: this action uses the same patched `nvidia.ko`, but reloads it once with P2P parameters and switches the relevant IOMMU groups to `identity`.
 
 P2P is not written to autostart and does not change the normal compute handoff. After a reboot, compute service restart, or NVIDIA driver unload/reload, enable P2P again through `ENABLE P2P`.
@@ -261,6 +271,8 @@ nvidia-smi topo -p2p w
 ```
 
 ## Installation
+
+**Debian 13 / issue #7:** Gen2 checks BAR0 access before PCIe retries. On `EINVAL`/`EPERM`, it adds a GRUB `iomem=relaxed` drop-in and runs `update-grub` if available; reboot manually before retrying. Other errors leave GRUB unchanged. Credit: [@n0kkster](https://github.com/n0kkster).
 
 This project is designed for headless servers. Avoid connecting a monitor to the server at all: installation, Compute Unlock, PCIe Gen2, and P2P are intended to be performed over SSH. A connected display may cause `nouveau` to load and claim the CMP 90HX before the required driver is installed.
 
